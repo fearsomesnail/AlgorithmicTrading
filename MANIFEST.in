@@ -1,0 +1,24 @@
+include README.md
+include LICENSE
+include requirements.txt
+include setup.py
+include MANIFEST.in
+recursive-include src *.py
+recursive-include src *.yaml
+recursive-include src *.yml
+recursive-include tests *.py
+include ALGOTRADING_DEMO.ipynb
+include PROJECT_JOURNAL.md
+exclude results/*
+exclude logs/*
+exclude *.log
+exclude *.db
+exclude *.sqlite
+exclude *.csv
+exclude *.parquet
+exclude *.pkl
+exclude *.pt
+exclude *.pth
+exclude test_*.py
+exclude debug_*.py
+exclude *_test.py
