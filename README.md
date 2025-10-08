@@ -76,7 +76,7 @@ This will:
 ### Key Insights
 
 - **LSTM underperformed baseline** on correlation metrics (negative IC/Rank-IC)
-- **Dispersion check PASSED** (ratio 0.340 ≥ 0.25) - model produced non-collapsed signals
+- **Dispersion check PASSED** (ratio 0.340 >= 0.25) - model produced non-collapsed signals
 - **Positive backtest performance** despite negative IC suggests regime sensitivity
 - **Temporal validation** prevents data leakage with proper embargo periods
 
@@ -86,20 +86,20 @@ This will:
 
 ```
 src/algotrading/
-├── core/
-│   └── types.py              # Data structures and metrics
-├── services/
-│   ├── models/
-│   │   ├── data_loader.py    # Data loading and feature engineering
-│   │   ├── trainer.py        # LSTM model training
-│   │   ├── baseline_model.py # Ridge regression baseline
-│   │   ├── model_nn.py       # LSTM architecture
-│   │   ├── scaler_manager.py # Feature/target scaling
-│   │   └── temporal_splitter.py # Temporal data splitting
-│   ├── backtester/
-│   │   └── metrics.py        # Backtesting and performance metrics
-│   └── results_manager.py    # Experiment logging and result storage
-└── demo.py                   # Main demo script
+ core/
+    types.py              # Data structures and metrics
+ services/
+    models/
+       data_loader.py    # Data loading and feature engineering
+       trainer.py        # LSTM model training
+       baseline_model.py # Ridge regression baseline
+       model_nn.py       # LSTM architecture
+       scaler_manager.py # Feature/target scaling
+       temporal_splitter.py # Temporal data splitting
+    backtester/
+       metrics.py        # Backtesting and performance metrics
+    results_manager.py    # Experiment logging and result storage
+ demo.py                   # Main demo script
 ```
 
 ### Data Pipeline
@@ -126,7 +126,7 @@ src/algotrading/
 - **Architecture**: Ridge regression with L2 regularization (alpha=1.0)
 - **Purpose**: Provides baseline comparison for LSTM performance
 
-## 🔬 Key Features
+##  Key Features
 
 ### 1. Temporal Validation
 - **Proper time-based splits** (Train/Val/Test)
@@ -158,7 +158,7 @@ src/algotrading/
 - **Result storage**: Config, metrics, predictions, plots saved automatically
 - **Reproducibility**: All parameters and random seeds logged
 
-## 📈 Usage Examples
+##  Usage Examples
 
 ### Basic Training
 
@@ -214,7 +214,7 @@ print(f"Baseline IC: {baseline_ic:.4f}")
 print(f"Improvement: {lstm_ic - baseline_ic:.4f}")
 ```
 
-## 📊 Understanding the Results
+##  Understanding the Results
 
 ### Metrics Explained
 
@@ -228,7 +228,7 @@ print(f"Improvement: {lstm_ic - baseline_ic:.4f}")
 
 The system automatically flags potential issues:
 
-- **PREDICTION COLLAPSE**: When prediction std < 0.25 × target std
+- **PREDICTION COLLAPSE**: When prediction std < 0.25  target std
 - **LOW IC**: When IC magnitude < 0.01
 - **HIGH SHARPE + LOW IC**: Possible data leakage
 - **FEATURE MISMATCH**: When feature columns don't match configuration
@@ -237,7 +237,7 @@ The system automatically flags potential issues:
 
 **Good Model**:
 - IC > 0.05, Rank-IC > 0.05
-- Prediction std > 0.25 × target std
+- Prediction std > 0.25  target std
 - LSTM outperforms baseline
 - No quality flags triggered
 
@@ -248,12 +248,12 @@ The system automatically flags potential issues:
 - LSTM performs worse than baseline
 
 **Current Model Status**:
-- **Dispersion**: PASS (ratio 0.340 ≥ 0.25) - non-collapsed signals
+- **Dispersion**: PASS (ratio 0.340  0.25) - non-collapsed signals
 - **IC/Rank-IC**: Negative but model produces usable signals
 - **Backtest**: Positive performance despite negative IC (regime sensitivity)
 - **Quality**: Model passes dispersion checks but shows correlation challenges
 
-## 🔧 Configuration Options
+##  Configuration Options
 
 ### TrainingConfig Parameters
 
@@ -287,36 +287,36 @@ class TrainingConfig:
     ]
 ```
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 AlgorithmicTrading/
-├── src/algotrading/              # Main source code
-│   ├── core/                     # Core types and utilities
-│   ├── services/                 # Business logic and ML services
-│   └── demo.py                   # Main demo script
-├── tests/                        # Test files
-├── ALGOTRADING_DEMO.ipynb       # Colab notebook
-├── PROJECT_JOURNAL.md            # Detailed project documentation
-├── IMPLEMENTATION_SUMMARY.md     # Technical implementation details
-├── requirements.txt              # Python dependencies
-├── setup.py                      # Package installation
-├── LICENSE                       # MIT License
-└── README.md                     # This file
+ src/algotrading/              # Main source code
+    core/                     # Core types and utilities
+    services/                 # Business logic and ML services
+    demo.py                   # Main demo script
+ tests/                        # Test files
+ ALGOTRADING_DEMO.ipynb       # Colab notebook
+ PROJECT_JOURNAL.md            # Detailed project documentation
+ IMPLEMENTATION_SUMMARY.md     # Technical implementation details
+ requirements.txt              # Python dependencies
+ setup.py                      # Package installation
+ LICENSE                       # MIT License
+ README.md                     # This file
 ```
 
-## 🎓 Academic Context
+##  Academic Context
 
 This project was developed for **Machine Learning Assignment 3 (A2/A3)** and demonstrates:
 
 ### A2 Requirements Met
-- ✅ **Self-contained demo**: Complete Colab notebook with one-click execution
-- ✅ **Project Journal**: Comprehensive PDF-ready documentation
-- ✅ **Task Definition**: Clear I/O specifications and data schemas
-- ✅ **Model/Algorithm Mapping**: Theory-to-code connections documented
-- ✅ **Evaluation & Results**: Real metrics with sensitivity analysis
-- ✅ **Validation Scheme**: Proper temporal splits with embargo
-- ✅ **AI Tool Documentation**: Transparent about tool usage
+-  **Self-contained demo**: Complete Colab notebook with one-click execution
+-  **Project Journal**: Comprehensive PDF-ready documentation
+-  **Task Definition**: Clear I/O specifications and data schemas
+-  **Model/Algorithm Mapping**: Theory-to-code connections documented
+-  **Evaluation & Results**: Real metrics with sensitivity analysis
+-  **Validation Scheme**: Proper temporal splits with embargo
+-  **AI Tool Documentation**: Transparent about tool usage
 
 ### Key Learning Outcomes
 - **Temporal validation** in financial ML
@@ -326,7 +326,7 @@ This project was developed for **Machine Learning Assignment 3 (A2/A3)** and dem
 - **Prediction quality** assessment
 - **Reproducible research** practices
 
-## 🚨 Known Limitations
+##  Known Limitations
 
 1. **Small Universe**: Only 6 ASX stocks (low cross-sectional breadth undermines stable IC estimation)
 2. **Feature Simplicity**: Only 5 technical features - no fundamentals, sentiment, or macro factors
@@ -335,9 +335,9 @@ This project was developed for **Machine Learning Assignment 3 (A2/A3)** and dem
 5. **Calibration Skipped**: Potential mismatch between raw prediction dispersion and target variance
 6. **Limited Time Window**: Short training period may not capture full market cycles
 
-## 🔮 Future Improvements
+##  Future Improvements
 
-1. **Expand Universe**: ≥50 ASX names to stabilize cross-sectional statistics
+1. **Expand Universe**: 50 ASX names to stabilize cross-sectional statistics
 2. **Richer Features**: Add fundamentals, news/sentiment, macro factors; engineer sector/market beta-neutralization
 3. **Model Diversity**: Try GRUs, TCNs, Transformers, and tree-based models; build ensembles
 4. **Regularization & Calibration**: Tune weight decay/dropout; implement variance calibration in evaluation
@@ -345,14 +345,14 @@ This project was developed for **Machine Learning Assignment 3 (A2/A3)** and dem
 6. **Stability Checks**: Defend against "lucky splits" using multi-window rolling tests, purged K-fold (time-aware), and nested CV for hyperparameters
 7. **Monitoring**: Add live drift checks and rolling IC dashboards
 
-## 📚 References
+##  References
 
 - **LSTM for Financial Prediction**: Hochreiter & Schmidhuber (1997)
 - **Information Coefficient**: Grinold & Kahn (2000)
 - **Temporal Validation**: Prado (2018) "Advances in Financial Machine Learning"
 - **Feature Engineering**: Guido (2017) "Python for Finance"
 
-## 🤝 Contributing
+##  Contributing
 
 This is an academic project, but suggestions for improvements are welcome:
 
@@ -362,11 +362,11 @@ This is an academic project, but suggestions for improvements are welcome:
 4. Add tests if applicable
 5. Submit a pull request
 
-## 📄 License
+##  License
 
 This project is for educational purposes. Please cite appropriately if used in research.
 
-## 📞 Contact
+##  Contact
 
 For questions about this project, please refer to the `PROJECT_JOURNAL.md` for detailed documentation or create an issue in the repository.
 
@@ -375,4 +375,4 @@ For questions about this project, please refer to the `PROJECT_JOURNAL.md` for d
 **Last Updated**: October 2025  
 **Version**: 1.0.0  
 **Python**: 3.8+  
-**Status**: Ready for A2/A3 Submission ✅
+**Status**: Ready for A2/A3 Submission 
