@@ -26,8 +26,8 @@ This project implements a complete algorithmic trading research pipeline that:
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd ALGOTRADING_A2_CLEAN
+git clone https://github.com/fearsomesnail/AlgorithmicTrading.git
+cd AlgorithmicTrading
 
 # Install dependencies
 pip install -r requirements.txt
@@ -38,32 +38,46 @@ pip install -r requirements.txt
 ```bash
 # Run the complete end-to-end demo
 python -m src.algotrading.demo
+
+# Or run in quick mode (reduced epochs for faster testing)
+python -m src.algotrading.demo --quick
 ```
 
 This will:
 1. Download ASX data for 6 major stocks (BHP, CBA, CSL, WES, WBC, TLS)
-2. Engineer technical features
-3. Train both Ridge baseline and LSTM models
-4. Compare performance metrics
-5. Run backtesting simulation
-6. Generate comprehensive reports
+2. Engineer technical features (returns, RSI, volatility)
+3. Create temporal sequences with proper validation splits
+4. Train both Ridge baseline and LSTM models
+5. Compare performance metrics (IC, Rank-IC, RMSE)
+6. Run backtesting simulation with quality controls
+7. Generate comprehensive reports in `results/run_YYYYMMDD_HHMMSS/`
 
 ## Recent Results
 
 ### Model Performance (Latest Run)
 
-| Metric | LSTM | Ridge Baseline | Improvement |
-|--------|------|----------------|-------------|
-| **Test IC** | 0.0648 | 0.0199 | +0.0449 |
-| **Test Rank-IC** | 0.0649 | 0.0088 | +0.0562 |
-| **Test RMSE** | 0.028417 | 0.028485 | +0.000004 |
-| **Prediction Std** | 0.005399 | 0.003033 | +1.78x |
+| Metric | LSTM | Ridge Baseline | Delta |
+|--------|------|----------------|-------|
+| **Test IC** | -0.1068 | 0.0199 | -0.1267 |
+| **Test Rank-IC** | -0.0960 | 0.0094 | -0.1054 |
+| **Test RMSE** | 0.029912 | 0.028485 | +0.00143 |
+| **Prediction Std** | 0.007603 | 0.003033 | +2.506x |
+
+### Backtest Performance
+
+| Metric | Value |
+|--------|-------|
+| **Total Return** | 26.89% |
+| **Sharpe Ratio** | 1.567 |
+| **Max Drawdown** | -26.02% |
+| **Win Rate** | 56.07% |
+| **Volatility** | 24.00% |
 
 ### Key Insights
 
-- **LSTM significantly outperforms baseline** on ranking metrics
-- **Positive IC and Rank-IC** indicate meaningful predictive power
-- **Model quality validation** correctly identifies prediction variance issues
+- **LSTM underperformed baseline** on correlation metrics (negative IC/Rank-IC)
+- **Dispersion check PASSED** (ratio 0.340 ≥ 0.25) - model produced non-collapsed signals
+- **Positive backtest performance** despite negative IC suggests regime sensitivity
 - **Temporal validation** prevents data leakage with proper embargo periods
 
 ## System Architecture
@@ -101,14 +115,15 @@ src/algotrading/
 
 #### LSTM Model
 - **Input**: 30-day sequences of 5 technical features
-- **Architecture**: 2-layer LSTM with symbol embeddings
+- **Architecture**: 2-layer LSTM with symbol embeddings (hidden_size=64, embedding_dim=12)
 - **Output**: Single value prediction for 5-day forward return
 - **Regularization**: Dropout (0.1), Weight decay (5e-5)
-- **Optimization**: Adam with learning rate scheduling
+- **Optimization**: Adam (lr=0.001) with early stopping on validation Rank-IC
+- **Parameters**: 56,841 total parameters
 
 #### Ridge Baseline
 - **Input**: Flattened 30-day sequences (150 features)
-- **Architecture**: Ridge regression with L2 regularization
+- **Architecture**: Ridge regression with L2 regularization (alpha=1.0)
 - **Purpose**: Provides baseline comparison for LSTM performance
 
 ## 🔬 Key Features
@@ -125,10 +140,11 @@ src/algotrading/
 - **Feature validation**: Ensures correct column ordering and ranges
 
 ### 3. Model Quality Controls
-- **Prediction variance monitoring**: Flags models with collapsed predictions
+- **Prediction variance monitoring**: Flags models with collapsed predictions (ratio < 0.25)
 - **IC/Rank-IC validation**: Ensures meaningful predictive power
-- **Early stopping**: Prevents overfitting using validation Rank-IC
+- **Early stopping**: Prevents overfitting using validation Rank-IC (patience=5)
 - **Dispersion penalty**: Encourages prediction variance during training
+- **Cross-sectional validation**: Per-date dispersion checks across symbols
 
 ### 4. Comprehensive Evaluation
 - **Daily cross-sectional IC**: Computes IC across symbols per date
@@ -231,6 +247,12 @@ The system automatically flags potential issues:
 - Quality flags triggered
 - LSTM performs worse than baseline
 
+**Current Model Status**:
+- **Dispersion**: PASS (ratio 0.340 ≥ 0.25) - non-collapsed signals
+- **IC/Rank-IC**: Negative but model produces usable signals
+- **Backtest**: Positive performance despite negative IC (regime sensitivity)
+- **Quality**: Model passes dispersion checks but shows correlation challenges
+
 ## 🔧 Configuration Options
 
 ### TrainingConfig Parameters
@@ -268,14 +290,18 @@ class TrainingConfig:
 ## 📁 Project Structure
 
 ```
-ALGOTRADING_A2_CLEAN/
+AlgorithmicTrading/
 ├── src/algotrading/              # Main source code
-├── results/                      # Experiment results
-│   └── run_YYYYMMDD_HHMMSS/     # Timestamped run directories
+│   ├── core/                     # Core types and utilities
+│   ├── services/                 # Business logic and ML services
+│   └── demo.py                   # Main demo script
+├── tests/                        # Test files
 ├── ALGOTRADING_DEMO.ipynb       # Colab notebook
 ├── PROJECT_JOURNAL.md            # Detailed project documentation
 ├── IMPLEMENTATION_SUMMARY.md     # Technical implementation details
 ├── requirements.txt              # Python dependencies
+├── setup.py                      # Package installation
+├── LICENSE                       # MIT License
 └── README.md                     # This file
 ```
 
@@ -302,20 +328,22 @@ This project was developed for **Machine Learning Assignment 3 (A2/A3)** and dem
 
 ## 🚨 Known Limitations
 
-1. **Prediction Variance**: Models tend to predict near-constant values
-2. **Limited Universe**: Only 6 ASX stocks (small cross-sectional diversity)
-3. **Simple Features**: Basic technical indicators only
-4. **No Market Regime**: No adaptation to different market conditions
-5. **Transaction Costs**: Backtesting doesn't include realistic trading costs
+1. **Small Universe**: Only 6 ASX stocks (low cross-sectional breadth undermines stable IC estimation)
+2. **Feature Simplicity**: Only 5 technical features - no fundamentals, sentiment, or macro factors
+3. **Regime Sensitivity**: Negative IC/Rank-IC vs positive PnL hints at non-robustness
+4. **Backtest Realism**: No transaction costs, slippage, borrow constraints, or capacity limits
+5. **Calibration Skipped**: Potential mismatch between raw prediction dispersion and target variance
+6. **Limited Time Window**: Short training period may not capture full market cycles
 
 ## 🔮 Future Improvements
 
-1. **More Symbols**: Expand to 50+ ASX stocks
-2. **Advanced Features**: Add fundamental, sentiment, macro features
-3. **Ensemble Methods**: Combine multiple models
-4. **Online Learning**: Adapt to new data continuously
-5. **Risk Management**: Add position sizing and risk controls
-6. **Alternative Architectures**: Try Transformers, GRUs, or hybrid models
+1. **Expand Universe**: ≥50 ASX names to stabilize cross-sectional statistics
+2. **Richer Features**: Add fundamentals, news/sentiment, macro factors; engineer sector/market beta-neutralization
+3. **Model Diversity**: Try GRUs, TCNs, Transformers, and tree-based models; build ensembles
+4. **Regularization & Calibration**: Tune weight decay/dropout; implement variance calibration in evaluation
+5. **Robust Backtesting**: Include costs/slippage; daily capacity limits; turnover and risk budgets; portfolio optimizer
+6. **Stability Checks**: Defend against "lucky splits" using multi-window rolling tests, purged K-fold (time-aware), and nested CV for hyperparameters
+7. **Monitoring**: Add live drift checks and rolling IC dashboards
 
 ## 📚 References
 
