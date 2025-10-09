@@ -41,6 +41,7 @@ python -m src.algotrading.demo
 
 # Or run in quick mode (reduced epochs for faster testing)
 python -m src.algotrading.demo --quick
+# Quick mode sets max_epochs=5 (configurable)
 ```
 
 This will:
@@ -55,6 +56,8 @@ This will:
 ## Recent Results
 
 ### Model Performance (Latest Run - 2025-10-09)
+
+Reproduced from results/run_20251009_200211/
 
 | Metric | LSTM | Ridge Baseline | Delta |
 |--------|------|----------------|-------|
@@ -73,6 +76,8 @@ This will:
 | **Win Rate** | 60.65% |
 | **Volatility** | 24.99% |
 | **Calmar Ratio** | 6.278 |
+
+*Calmar Ratio = CAGR / Max Drawdown = 95.48% / 15.21% = 6.278*
 
 ### Key Insights
 
@@ -121,7 +126,7 @@ src/algotrading/
 - **Output**: Single value prediction for 5-day forward return
 - **Regularization**: Dropout (0.2), Weight decay (1e-5)
 - **Optimization**: Adam (lr=0.0003) with early stopping on validation Rank-IC
-- **Parameters**: 8,361 total parameters
+- **Parameters**: 8,361 total parameters (see training log in run folder)
 
 #### Ridge Baseline
 - **Input**: Flattened 30-day sequences (540 features = 30 × 18)
@@ -150,7 +155,7 @@ src/algotrading/
 ### 3. Model Quality Controls
 - **Prediction variance monitoring**: Flags models with collapsed predictions (ratio < 0.25)
 - **IC/Rank-IC validation**: Ensures meaningful predictive power
-- **Early stopping**: Prevents overfitting using validation Rank-IC (patience=5)
+- **Early stopping**: Prevents overfitting using validation Rank-IC (patience=4)
 - **Dispersion penalty**: Encourages prediction variance during training
 - **Cross-sectional validation**: Per-date dispersion checks across symbols
 
@@ -320,6 +325,9 @@ AlgorithmicTrading/
 
 This project was developed for **Machine Learning Assignment 3 (A2/A3)** and demonstrates:
 
+### Final Assessment Report
+- [**Final Assessment Report (PDF)**](PROJECT_JOURNAL.md) - Comprehensive project documentation and analysis
+
 ### A2 Requirements Met
 -  **Self-contained demo**: Complete Colab notebook with one-click execution
 -  **Project Journal**: Comprehensive PDF-ready documentation
@@ -376,6 +384,17 @@ This is an academic project, but suggestions for improvements are welcome:
 ##  License
 
 This project is for educational purposes. Please cite appropriately if used in research.
+
+##  Reproduce These Exact Numbers
+
+To reproduce the exact results shown in this README:
+
+```bash
+git checkout be4006e
+python -m src.algotrading.demo    # produces results/run_20251009_200211/
+```
+
+**System Requirements**: Python 3.8+, Windows 10/11
 
 ##  Contact
 
