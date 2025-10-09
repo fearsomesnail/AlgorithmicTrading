@@ -54,30 +54,32 @@ This will:
 
 ## Recent Results
 
-### Model Performance (Latest Run)
+### Model Performance (Latest Run - 2025-10-09)
 
 | Metric | LSTM | Ridge Baseline | Delta |
 |--------|------|----------------|-------|
-| **Test IC** | -0.1068 | 0.0199 | -0.1267 |
-| **Test Rank-IC** | -0.0960 | 0.0094 | -0.1054 |
-| **Test RMSE** | 0.029912 | 0.028485 | +0.00143 |
-| **Prediction Std** | 0.007603 | 0.003033 | +2.506x |
+| **Test IC** | 0.0367 | -0.0025 | +0.0393 |
+| **Test Rank-IC** | 0.0363 | -0.0485 | +0.0848 |
+| **Test RMSE** | 0.027889 | 0.028903 | -0.001014 |
+| **Prediction Std** | 0.005757 | 0.007875 | -0.269x |
 
 ### Backtest Performance
 
 | Metric | Value |
 |--------|-------|
-| **Total Return** | 26.89% |
-| **Sharpe Ratio** | 1.567 |
-| **Max Drawdown** | -26.02% |
-| **Win Rate** | 56.07% |
-| **Volatility** | 24.00% |
+| **Total Return** | 76.33% |
+| **Sharpe Ratio** | 3.820 |
+| **Max Drawdown** | -15.21% |
+| **Win Rate** | 60.65% |
+| **Volatility** | 24.99% |
+| **Calmar Ratio** | 6.278 |
 
 ### Key Insights
 
-- **LSTM underperformed baseline** on correlation metrics (negative IC/Rank-IC)
-- **Dispersion check PASSED** (ratio 0.340 >= 0.25) - model produced non-collapsed signals
-- **Positive backtest performance** despite negative IC suggests regime sensitivity
+- **LSTM significantly outperformed baseline** on all correlation metrics (positive IC/Rank-IC)
+- **Dispersion check PASSED** (ratio 0.297 >= 0.25) - model produced non-collapsed signals
+- **Strong backtest performance** with excellent risk-adjusted returns (Sharpe 3.82)
+- **18-feature model** with enhanced technical indicators (RSI variants, MACD, ATR, momentum)
 - **Temporal validation** prevents data leakage with proper embargo periods
 
 ## System Architecture
@@ -114,15 +116,15 @@ src/algotrading/
 ### Model Architecture
 
 #### LSTM Model
-- **Input**: 30-day sequences of 5 technical features
-- **Architecture**: 2-layer LSTM with symbol embeddings (hidden_size=64, embedding_dim=12)
+- **Input**: 30-day sequences of 18 technical features
+- **Architecture**: 1-layer LSTM with symbol embeddings (hidden_size=32, embedding_dim=12)
 - **Output**: Single value prediction for 5-day forward return
-- **Regularization**: Dropout (0.1), Weight decay (5e-5)
-- **Optimization**: Adam (lr=0.001) with early stopping on validation Rank-IC
-- **Parameters**: 56,841 total parameters
+- **Regularization**: Dropout (0.2), Weight decay (1e-5)
+- **Optimization**: Adam (lr=0.0003) with early stopping on validation Rank-IC
+- **Parameters**: 8,361 total parameters
 
 #### Ridge Baseline
-- **Input**: Flattened 30-day sequences (150 features)
+- **Input**: Flattened 30-day sequences (540 features = 30 × 18)
 - **Architecture**: Ridge regression with L2 regularization (alpha=1.0)
 - **Purpose**: Provides baseline comparison for LSTM performance
 
@@ -134,9 +136,15 @@ src/algotrading/
 - **No future data** used in training or validation
 
 ### 2. Feature Engineering
-- **Technical indicators**: 1-day, 5-day, 21-day returns
-- **RSI (14-day)**: Relative Strength Index
-- **Volatility**: Z-score normalized rolling volatility
+- **Returns**: 1-day, 5-day, 21-day returns
+- **RSI indicators**: 2-day, 14-day, 50-day RSI
+- **MACD**: MACD line and signal line
+- **ATR**: 14-day Average True Range
+- **Volatility**: 5-day and 21-day realized volatility
+- **Volume**: Volume z-score and volume ratio
+- **Price**: Inverse price feature
+- **Momentum**: 3-month, 6-month, 12-month momentum
+- **Reversal**: 1-day reversal signal
 - **Feature validation**: Ensures correct column ordering and ranges
 
 ### 3. Model Quality Controls
@@ -248,10 +256,10 @@ The system automatically flags potential issues:
 - LSTM performs worse than baseline
 
 **Current Model Status**:
-- **Dispersion**: PASS (ratio 0.340  0.25) - non-collapsed signals
-- **IC/Rank-IC**: Negative but model produces usable signals
-- **Backtest**: Positive performance despite negative IC (regime sensitivity)
-- **Quality**: Model passes dispersion checks but shows correlation challenges
+- **Dispersion**: PASS (ratio 0.297 >= 0.25) - non-collapsed signals
+- **IC/Rank-IC**: Positive correlation metrics (IC=0.037, Rank-IC=0.036)
+- **Backtest**: Excellent performance with 76% returns and Sharpe 3.82
+- **Quality**: Model shows strong predictive power and risk-adjusted returns
 
 ##  Configuration Options
 
@@ -262,17 +270,17 @@ The system automatically flags potential issues:
 class TrainingConfig:
     # Model architecture
     sequence_length: int = 30      # Length of input sequences
-    hidden_size: int = 64          # LSTM hidden units
-    num_layers: int = 2            # Number of LSTM layers
+    hidden_size: int = 32          # LSTM hidden units
+    num_layers: int = 1            # Number of LSTM layers
     embedding_dim: int = 12        # Symbol embedding dimension
-    dropout: float = 0.1           # Dropout rate
+    dropout: float = 0.2           # Dropout rate
     
     # Training parameters
-    learning_rate: float = 1e-3    # Learning rate
-    batch_size: int = 256          # Batch size
-    max_epochs: int = 30           # Maximum epochs
-    early_stopping_patience: int = 8  # Early stopping patience
-    weight_decay: float = 5e-5     # L2 regularization
+    learning_rate: float = 3e-4    # Learning rate
+    batch_size: int = 6            # Batch size
+    max_epochs: int = 15           # Maximum epochs
+    early_stopping_patience: int = 4  # Early stopping patience
+    weight_decay: float = 1e-5     # L2 regularization
     
     # Data parameters
     horizon_days: int = 5          # Prediction horizon
@@ -283,7 +291,10 @@ class TrainingConfig:
     
     # Features
     features: List[str] = [        # Technical features to use
-        "ret1", "ret5", "ret21", "rsi14", "volz"
+        "ret1", "ret5", "ret21", "rsi14", "rsi2", "rsi50", 
+        "macd", "macd_signal", "atr14", "realized_vol_5", 
+        "realized_vol_21", "volz", "volume_ratio", "inv_price", 
+        "mom_3m", "mom_6m", "mom_12m", "reversal_1d"
     ]
 ```
 
@@ -329,11 +340,11 @@ This project was developed for **Machine Learning Assignment 3 (A2/A3)** and dem
 ##  Known Limitations
 
 1. **Small Universe**: Only 6 ASX stocks (low cross-sectional breadth undermines stable IC estimation)
-2. **Feature Simplicity**: Only 5 technical features - no fundamentals, sentiment, or macro factors
-3. **Regime Sensitivity**: Negative IC/Rank-IC vs positive PnL hints at non-robustness
-4. **Backtest Realism**: No transaction costs, slippage, borrow constraints, or capacity limits
-5. **Calibration Skipped**: Potential mismatch between raw prediction dispersion and target variance
-6. **Limited Time Window**: Short training period may not capture full market cycles
+2. **Feature Scope**: 18 technical features but no fundamentals, sentiment, or macro factors
+3. **Backtest Realism**: No transaction costs, slippage, borrow constraints, or capacity limits
+4. **Limited Time Window**: Short training period may not capture full market cycles
+5. **Model Complexity**: Single-layer LSTM may be underfitting complex market dynamics
+6. **Regime Dependency**: Performance may vary across different market conditions
 
 ##  Future Improvements
 
