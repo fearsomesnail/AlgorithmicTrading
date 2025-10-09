@@ -22,12 +22,12 @@ class TrainingConfig:
     hidden_size: int = 32  # Further reduced for tiny cross-section
     num_layers: int = 1    # Keep single layer
     embedding_dim: int = 12
-    dropout: float = 0.05  # Further reduced to avoid over-shrinking outputs
+    dropout: float = 0.2  # Match target run configuration
     
     # Training parameters
     learning_rate: float = 3e-4  # Lower LR for stability
     batch_size: int = 6    # Exactly one day per batch for cross-sectional training
-    max_epochs: int = 20   # More epochs with cosine+warmup
+    max_epochs: int = 15   # Match target run configuration
     early_stopping_patience: int = 4  # Shorter patience
     weight_decay: float = 1e-5  # Reduced for tiny cross-section
     
@@ -47,7 +47,9 @@ class TrainingConfig:
     def __post_init__(self):
         if self.features is None:
             self.features = [
-                "ret1", "ret5", "ret21", "rsi14", "volz"
+                "ret1", "ret5", "ret21", "rsi14", "rsi2", "rsi50", "macd", "macd_signal", 
+                "atr14", "realized_vol_5", "realized_vol_21", "volz", "volume_ratio", 
+                "inv_price", "mom_3m", "mom_6m", "mom_12m", "reversal_1d"
             ]
 
 

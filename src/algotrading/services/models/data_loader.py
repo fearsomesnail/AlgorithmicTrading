@@ -72,9 +72,22 @@ class ASXDataLoader:
             symbol_data["ret5"] = prices[symbol].pct_change(5)
             symbol_data["ret21"] = prices[symbol].pct_change(21)
             
-            # RSI calculation
-            rsi = self._calculate_rsi(returns[symbol], window=14)
-            symbol_data["rsi14"] = rsi
+            # RSI calculations
+            symbol_data["rsi14"] = self._calculate_rsi(returns[symbol], window=14)
+            symbol_data["rsi2"] = self._calculate_rsi(returns[symbol], window=2)
+            symbol_data["rsi50"] = self._calculate_rsi(returns[symbol], window=50)
+            
+            # MACD calculation
+            macd, macd_signal = self._calculate_macd(prices[symbol])
+            symbol_data["macd"] = macd
+            symbol_data["macd_signal"] = macd_signal
+            
+            # ATR calculation
+            symbol_data["atr14"] = self._calculate_atr(prices[symbol], window=14)
+            
+            # Realized volatility
+            symbol_data["realized_vol_5"] = returns[symbol].rolling(5).std()
+            symbol_data["realized_vol_21"] = returns[symbol].rolling(21).std()
             
             # Volume z-score
             if symbol in volumes.columns:
@@ -84,9 +97,19 @@ class ASXDataLoader:
             else:
                 symbol_data["volz"] = 0.0
             
-            # Additional features
-            symbol_data["volatility"] = returns[symbol].rolling(21).std()
+            # Volume ratio
             symbol_data["volume_ratio"] = volumes[symbol] / volumes[symbol].rolling(21).mean() if symbol in volumes.columns else 1.0
+            
+            # Inverse price
+            symbol_data["inv_price"] = 1.0 / prices[symbol]
+            
+            # Momentum features
+            symbol_data["mom_3m"] = prices[symbol].pct_change(63)  # 3 months ≈ 63 trading days
+            symbol_data["mom_6m"] = prices[symbol].pct_change(126)  # 6 months ≈ 126 trading days
+            symbol_data["mom_12m"] = prices[symbol].pct_change(252)  # 12 months ≈ 252 trading days
+            
+            # Reversal feature
+            symbol_data["reversal_1d"] = -returns[symbol]  # Negative of 1-day return
             
             # Enforce feature configuration - only keep configured features in exact order
             symbol_data = enforce_feature_config(symbol_data, self.config.features)
@@ -142,6 +165,22 @@ class ASXDataLoader:
         rsi = 100 - (100 / (1 + rs))
         
         return rsi
+    
+    def _calculate_macd(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series]:
+        """Calculate MACD indicator."""
+        ema_fast = prices.ewm(span=fast).mean()
+        ema_slow = prices.ewm(span=slow).mean()
+        macd = ema_fast - ema_slow
+        macd_signal = macd.ewm(span=signal).mean()
+        return macd, macd_signal
+    
+    def _calculate_atr(self, prices: pd.Series, window: int = 14) -> pd.Series:
+        """Calculate Average True Range (ATR) indicator."""
+        # For simplicity, we'll use price range as proxy for ATR since we don't have high/low data
+        # In practice, ATR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+        price_range = prices.rolling(window=2).apply(lambda x: abs(x.iloc[1] - x.iloc[0]) if len(x) == 2 else np.nan)
+        atr = price_range.rolling(window=window).mean()
+        return atr
     
     def calculate_targets(self, prices: pd.DataFrame, benchmark_prices: pd.Series, 
                          horizon: int = 5) -> Dict[str, pd.Series]:
@@ -279,10 +318,10 @@ class ASXDataLoader:
             first_symbol_data = features[list(features.keys())[0]]
             first_symbol_data = first_symbol_data[self.config.features]  # Reorder to match config
             
-            # CRITICAL: Assert exact feature order
-            EXPECTED = ['ret1', 'ret5', 'ret21', 'rsi14', 'volz']
+            # CRITICAL: Assert exact feature order matches config
             actual_features = list(first_symbol_data.columns)
-            assert actual_features == EXPECTED, f"Feature order mismatch: {actual_features} != {EXPECTED}"
+            expected_features = self.config.features
+            assert actual_features == expected_features, f"Feature order mismatch: {actual_features} != {expected_features}"
             logger.info("Feature order validation passed")
         
         return TrainingData(
