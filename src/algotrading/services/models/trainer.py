@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from ...core.types import (
     TrainingConfig, TrainingData, ModelMetrics, 
-    calculate_metrics, calculate_daily_ic, calculate_daily_rank_ic
+    calculate_metrics, calculate_daily_ic, calculate_daily_rank_ic, _calculate_daily_rank_ic_values
 )
 from .model_nn import ModelFactory, count_parameters
 from .scaler_manager import ScalerManager
@@ -636,6 +636,10 @@ class ModelTrainer:
         # Training loop
         best_val_rank_ic = float('-inf')
         best_model_state = None
+        best_checkpoint_epoch = 0
+        best_checkpoint_rank_ic = float('-inf')
+        best_checkpoint_ic = 0.0
+        best_checkpoint_std_ratio = 0.0
         collapse_abort_epochs = 0  # Track consecutive epochs with low CS ratio
         
         logger.info(f"Starting training loop for {self.config.max_epochs} epochs...")
@@ -693,21 +697,31 @@ class ModelTrainer:
             
             smoothed_val = self.early_stopping.smoothed_metric if self.early_stopping.smoothed_metric is not None else 0.0
             
-            # Log loss breakdown
-            logger.info(f"Loss breakdown - Train: huber={train_loss_components.get('huber', 0):.4f}, cs_corr={train_loss_components.get('cs_corr_loss', 0):.4f}, var_penalty={train_loss_components.get('var_penalty', 0):.4f}, total={train_loss_components.get('total_loss', train_loss):.4f}")
-            logger.info(f"Loss breakdown - Val: huber={val_loss:.4f}")
+            # Log loss breakdown (means, not sums)
+            train_mean_huber = train_loss_components.get('huber', 0)
+            train_mean_cs_corr = train_loss_components.get('cs_corr_loss', 0)
+            train_mean_var_penalty = train_loss_components.get('var_penalty', 0)
+            train_mean_total = train_loss_components.get('total_loss', train_loss)
+            
+            val_mean_huber = val_loss_components.get('huber', 0)
+            val_mean_cs_corr = val_loss_components.get('cs_corr_loss', 0)
+            val_mean_var_penalty = val_loss_components.get('var_penalty', 0)
+            val_mean_total = val_loss_components.get('total_loss', val_loss)
+            
+            logger.info(f"Loss breakdown - Train: huber={train_mean_huber:.4f}, cs_corr={train_mean_cs_corr:.4f}, var_penalty={train_mean_var_penalty:.4f}, total={train_mean_total:.4f}")
+            logger.info(f"Loss breakdown - Val: huber={val_mean_huber:.4f}, cs_corr={val_mean_cs_corr:.4f}, var_penalty={val_mean_var_penalty:.4f}, total={val_mean_total:.4f}")
+            logger.info(f"Loss weights: lambda_corr={1.0}, lambda_var={0.12}")
+            
+            # Log loss components with exact keys
+            logger.info(f"train_mean_huber={train_mean_huber:.4f}, train_mean_cs_corr={train_mean_cs_corr:.4f}, train_mean_var_penalty={train_mean_var_penalty:.4f}, train_mean_total={train_mean_total:.4f}")
+            logger.info(f"val_mean_huber={val_mean_huber:.4f}, val_mean_cs_corr={val_mean_cs_corr:.4f}, val_mean_var_penalty={val_mean_var_penalty:.4f}, val_mean_total={val_mean_total:.4f}")
             
             # Log cross-section metrics
             logger.info(f"Cross-section: Train CS ratio (scaled/orig): {train_ratio_scaled:.3f}/{train_ratio_orig:.3f}, Val CS ratio (scaled/orig): {val_ratio_scaled:.3f}/{val_ratio_orig:.3f}")
             logger.info(f"Rank-IC: Val={val_metrics.rank_ic:.4f}, Val EMA={smoothed_val:.4f}")
             
-            # Log per-day Rank-IC quantiles for stability check
-            if hasattr(val_metrics, 'daily_rank_ic') and val_metrics.daily_rank_ic is not None:
-                daily_rank_ic = val_metrics.daily_rank_ic
-                q10 = np.percentile(daily_rank_ic, 10)
-                q50 = np.percentile(daily_rank_ic, 50)
-                q90 = np.percentile(daily_rank_ic, 90)
-                logger.info(f"Per-day Rank-IC quantiles: Q10={q10:.4f}, Q50={q50:.4f}, Q90={q90:.4f}")
+            # TODO: Add per-day Rank-IC quantiles logging
+            # Need to collect actual predictions and dates in validate_epoch method
             
             # Check for cross-sectional collapse abort
             if val_ratio_orig < 0.18:  # CS ratio threshold
@@ -734,6 +748,10 @@ class ModelTrainer:
             if val_metrics.rank_ic >= 0 and val_metrics.rank_ic > best_val_rank_ic:
                 best_val_rank_ic = val_metrics.rank_ic
                 best_model_state = self.model.state_dict().copy()
+                best_checkpoint_epoch = epoch + 1
+                best_checkpoint_rank_ic = val_metrics.rank_ic
+                best_checkpoint_ic = val_metrics.ic
+                best_checkpoint_std_ratio = val_metrics.prediction_std / val_metrics.target_std if val_metrics.target_std > 0 else 0
                 logger.info(f"New best Val Rank-IC: {best_val_rank_ic:.4f} at epoch {epoch+1}")
             elif val_metrics.rank_ic < 0:
                 logger.warning(f"Val Rank-IC negative: {val_metrics.rank_ic:.4f} at epoch {epoch+1} - not checkpointing")
@@ -743,15 +761,53 @@ class ModelTrainer:
                 smoothed_val = -self.early_stopping.smoothed_metric if self.early_stopping.smoothed_metric is not None else 0.0
                 logger.info(f"Early stopping at epoch {epoch+1} (Val Rank-IC: {val_metrics.rank_ic:.4f}, Smoothed: {smoothed_val:.4f})")
                 break
+            
+            # Log early stopping status
+            patience = self.config.early_stopping_patience
+            epochs_since_improvement = self.early_stopping.counter if hasattr(self.early_stopping, 'counter') else 0
+            early_stop_status = f"patience={patience}, epochs_since_improvement={epochs_since_improvement}"
+            logger.info(f"Early stop status: {early_stop_status}")
+            
+            # Log checkpoint info
+            logger.info(f"best_epoch={best_checkpoint_epoch}, best_val_rank_ic={best_checkpoint_rank_ic:.4f}, best_val_ic={best_checkpoint_ic:.4f}, best_val_std_ratio={best_checkpoint_std_ratio:.3f}")
+            
+            # Check if early stopping should trigger
+            if epochs_since_improvement >= patience:
+                logger.info("early_stopping_triggered=True")
+                logger.info("Early stopping triggered.")
+                break
         
-        # Load best model
+        # Load best model and rerun validation to get fresh metrics
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
             logger.info("Loaded best model state")
+            
+            # Rerun validation on best checkpoint to get fresh metrics
+            logger.info("Rerunning validation on best checkpoint...")
+            _, best_val_metrics, _ = self._validate_epoch(val_loader, symbol_mapping)
+            
+            # Log best checkpoint info from stored metadata
+            best_epoch = best_checkpoint_epoch
+            best_val_rank_ic = best_checkpoint_rank_ic
+            best_val_ic = best_checkpoint_ic
+            best_val_std_ratio = best_checkpoint_std_ratio
+            logger.info(f"Best checkpoint: epoch={best_epoch}, val_rank_ic={best_val_rank_ic:.4f}, val_ic={best_val_ic:.4f}, val_std_ratio={best_val_std_ratio:.3f}")
+            
+            # Log postload validation metrics
+            postload_val_ic = best_val_metrics.ic
+            postload_val_rank_ic = best_val_metrics.rank_ic
+            postload_val_std_ratio = best_val_metrics.prediction_std / best_val_metrics.target_std if best_val_metrics.target_std > 0 else 0
+            logger.info(f"Postload validation: ic={postload_val_ic:.4f}, rank_ic={postload_val_rank_ic:.4f}, std_ratio={postload_val_std_ratio:.3f}")
+            logger.info(f"postload_val_ic={postload_val_ic:.4f}, postload_val_rank_ic={postload_val_rank_ic:.4f}, postload_val_std_ratio={postload_val_std_ratio:.3f}")
         else:
             logger.warning("No positive Rank-IC epochs found - model may not be suitable for trading")
+            best_val_metrics = val_metrics  # Use last epoch metrics as fallback
+            best_epoch = epoch + 1
+            best_val_rank_ic = val_metrics.rank_ic
+            best_val_ic = val_metrics.ic
+            best_val_std_ratio = val_metrics.prediction_std / val_metrics.target_std if val_metrics.target_std > 0 else 0
         
-        # Check if calibration would shrink signal
+        # Check if calibration would shrink signal using best checkpoint metrics
         val_predictions = self._get_raw_predictions(val_data, symbol_mapping)
         val_targets = val_data.targets
         
@@ -764,7 +820,8 @@ class ModelTrainer:
         
         # Check validation correlation before deciding on calibration
         val_corr = np.corrcoef(val_predictions_original, val_targets)[0, 1]
-        logger.info(f"Calibration check: val_corr={val_corr:.4f}, std_ratio={std_ratio:.3f}, val_rank_ic={val_metrics.rank_ic:.4f}")
+        logger.info(f"Calibration check: val_corr={val_corr:.4f}, std_ratio={std_ratio:.3f}, val_rank_ic={best_val_metrics.rank_ic:.4f}")
+        logger.info(f"Best checkpoint: epoch={best_epoch}, best_val_rank_ic={best_val_metrics.rank_ic:.4f}, best_val_ic={best_val_metrics.ic:.4f}, best_val_std_ratio={std_ratio:.3f}")
         
         apply_calibration = False
         calibration_method = "none"
@@ -772,13 +829,17 @@ class ModelTrainer:
         intercept = 0.0
         pre_std_ratio = std_ratio
         post_std_ratio = std_ratio
+        reason_skipped = "none"
         
         if val_corr <= 0:
-            logger.info(f"Skipping calibration: negative correlation {val_corr:.4f} - would invert signal")
-        elif val_metrics.rank_ic <= 0:
-            logger.info(f"Skipping calibration: negative Val Rank-IC {val_metrics.rank_ic:.4f} - model not suitable")
+            reason_skipped = f"negative correlation {val_corr:.4f}"
+            logger.info(f"Skipping calibration: {reason_skipped} - would invert signal")
+        elif best_val_metrics.rank_ic <= 0:
+            reason_skipped = f"negative Val Rank-IC {best_val_metrics.rank_ic:.4f}"
+            logger.info(f"Skipping calibration: {reason_skipped} - model not suitable")
         elif std_ratio < 0.15:
-            logger.info(f"Skipping calibration: would shrink signal (std ratio {std_ratio:.3f} < 0.15)")
+            reason_skipped = f"would shrink signal (std ratio {std_ratio:.3f} < 0.15)"
+            logger.info(f"Skipping calibration: {reason_skipped}")
         elif std_ratio <= 0.8:
             logger.info(f"Applying variance-matching calibration: std ratio {std_ratio:.3f} is beneficial (0.15 <= {std_ratio:.3f} <= 0.8)")
             self._fit_variance_matching_calibration(val_predictions_original, val_targets)
@@ -790,9 +851,17 @@ class ModelTrainer:
             val_predictions_cal = self._apply_calibration(val_predictions_original)
             post_std_ratio = np.std(val_predictions_cal) / np.std(val_targets)
         else:
-            logger.info(f"Skipping calibration: std ratio {std_ratio:.3f} > 0.8 (would over-amplify signal)")
+            reason_skipped = f"would over-amplify signal (std ratio {std_ratio:.3f} > 0.8)"
+            logger.info(f"Skipping calibration: {reason_skipped}")
         
         logger.info(f"Calibration result: apply={apply_calibration}, method={calibration_method}, slope={slope:.3f}, intercept={intercept:.6f}, pre_std_ratio={pre_std_ratio:.3f}, post_std_ratio={post_std_ratio:.3f}")
+        logger.info(f"Calibration reference: epoch={best_epoch}, reason_skipped={reason_skipped}")
+        
+        # Log calibration with exact keys
+        logger.info(f"apply_calibration={apply_calibration}, method={calibration_method}, slope={slope:.3f}, intercept={intercept:.6f}, pre_std_ratio={pre_std_ratio:.3f}, post_std_ratio={post_std_ratio:.3f}")
+        logger.info(f"calibration_reference_epoch={best_epoch}")
+        if not apply_calibration:
+            logger.info(f"calibration_reason_skipped={reason_skipped}")
         
         return {
             "train_losses": self.train_losses,

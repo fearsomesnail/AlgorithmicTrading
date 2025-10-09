@@ -270,6 +270,18 @@ def calculate_daily_rank_ic(predictions: np.ndarray, targets: np.ndarray,
     """
     Calculate daily cross-sectional Rank-IC and return mean, std, and count.
     """
+    daily_rank_ics = _calculate_daily_rank_ic_values(predictions, targets, dates)
+    
+    if len(daily_rank_ics) == 0:
+        return 0.0, 0.0, 0
+    
+    return float(np.mean(daily_rank_ics)), float(np.std(daily_rank_ics)), len(daily_rank_ics)
+
+def _calculate_daily_rank_ic_values(predictions: np.ndarray, targets: np.ndarray, 
+                                   dates: np.ndarray) -> List[float]:
+    """
+    Calculate daily cross-sectional Rank-IC and return individual daily values.
+    """
     import pandas as pd
     
     # Create DataFrame for easy grouping
@@ -283,7 +295,7 @@ def calculate_daily_rank_ic(predictions: np.ndarray, targets: np.ndarray,
     df = df.dropna()
     
     if len(df) < 2:
-        return 0.0, 0.0, 0
+        return []
     
     daily_rank_ics = []
     
@@ -308,10 +320,7 @@ def calculate_daily_rank_ic(predictions: np.ndarray, targets: np.ndarray,
             except:
                 continue
     
-    if len(daily_rank_ics) == 0:
-        return 0.0, 0.0, 0
-    
-    return float(np.mean(daily_rank_ics)), float(np.std(daily_rank_ics)), len(daily_rank_ics)
+    return daily_rank_ics
 
 
 def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> ModelMetrics:
