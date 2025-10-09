@@ -17,8 +17,7 @@ def read_requirements():
 setup(
     name="algotrading",
     version="1.0.0",
-    author="Harri",
-    author_email="harri@example.com",
+    author="Harry",
     description="Algorithmic Trading System for ASX Equity Return Prediction",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
