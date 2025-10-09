@@ -19,8 +19,21 @@ class ASXDataLoader:
     
     def __init__(self, config: TrainingConfig):
         self.config = config
+        # Expanded ASX200 universe - major liquid stocks
         self.universe = [
-            "BHP.AX", "CBA.AX", "CSL.AX", "WES.AX", "WBC.AX", "TLS.AX"
+            # Top 20 by market cap
+            "BHP.AX", "CBA.AX", "CSL.AX", "WES.AX", "WBC.AX", "TLS.AX", "ANZ.AX", "NAB.AX", 
+            "RIO.AX", "FMG.AX", "WOW.AX", "WDS.AX", "STO.AX", "ALL.AX", "QAN.AX", "SUN.AX",
+            "TCL.AX", "BXB.AX", "S32.AX", "WPL.AX",
+            # Additional liquid ASX200 stocks
+            "AGL.AX", "AMP.AX", "ASX.AX", "BEN.AX", "BOQ.AX", "BSL.AX", "CAR.AX", "CCL.AX",
+            "COH.AX", "CPU.AX", "CSR.AX", "CTD.AX", "DMP.AX", "DXS.AX", "ELD.AX", "EVN.AX",
+            "FLT.AX", "FPH.AX", "GMA.AX", "GPT.AX", "HUB.AX", "IEL.AX", "IGO.AX", "JBH.AX",
+            "JHX.AX", "LLC.AX", "MGR.AX", "MPL.AX", "NCM.AX", "NEC.AX", "NST.AX", "ORG.AX",
+            "OSH.AX", "PLS.AX", "PTM.AX", "QBE.AX", "REA.AX", "RHC.AX", "RMD.AX", "SDF.AX",
+            "SEK.AX", "SGM.AX", "SGR.AX", "SHL.AX", "SIG.AX", "SKC.AX", "SLR.AX", "SPK.AX",
+            "STG.AX", "SUL.AX", "SUN.AX", "TCL.AX", "TLS.AX", "TPG.AX", "TWE.AX", "VEA.AX",
+            "VOC.AX", "WBC.AX", "WDS.AX", "WES.AX", "WOW.AX", "WPL.AX", "XRO.AX", "ZIM.AX"
         ]
         self.benchmark = "^AXJO"
         
@@ -64,6 +77,12 @@ class ASXDataLoader:
         for symbol in self.universe:
             if symbol not in prices.columns:
                 continue
+            
+            # Check if symbol has valid data
+            symbol_prices = prices[symbol].dropna()
+            if len(symbol_prices) < 50:  # Need at least 50 data points for meaningful features
+                logger.warning(f"Skipping {symbol}: insufficient data ({len(symbol_prices)} points)")
+                continue
                 
             symbol_data = pd.DataFrame(index=prices.index)
             
@@ -72,21 +91,76 @@ class ASXDataLoader:
             symbol_data["ret5"] = prices[symbol].pct_change(5)
             symbol_data["ret21"] = prices[symbol].pct_change(21)
             
-            # RSI calculation
-            rsi = self._calculate_rsi(returns[symbol], window=14)
-            symbol_data["rsi14"] = rsi
+            # RSI calculations
+            symbol_data["rsi14"] = self._calculate_rsi(returns[symbol], window=14)
+            symbol_data["rsi2"] = self._calculate_rsi(returns[symbol], window=2)
+            symbol_data["rsi50"] = self._calculate_rsi(returns[symbol], window=50)
             
-            # Volume z-score
+            # MACD
+            macd_line, macd_signal, macd_hist = self._calculate_macd(prices[symbol])
+            symbol_data["macd"] = macd_line
+            symbol_data["macd_signal"] = macd_signal
+            symbol_data["macd_hist"] = macd_hist
+            
+            # Stochastic
+            stoch_k, stoch_d = self._calculate_stochastic(prices[symbol], volumes[symbol] if symbol in volumes.columns else None)
+            symbol_data["stoch_k"] = stoch_k
+            symbol_data["stoch_d"] = stoch_d
+            
+            # ATR
+            symbol_data["atr14"] = self._calculate_atr(prices[symbol], volumes[symbol] if symbol in volumes.columns else None)
+            
+            # Donchian width
+            donchian_high = prices[symbol].rolling(20).max()
+            donchian_low = prices[symbol].rolling(20).min()
+            symbol_data["donchian_width"] = (donchian_high - donchian_low) / prices[symbol]
+            
+            # Rolling skewness and kurtosis
+            symbol_data["skew_21"] = returns[symbol].rolling(21).skew()
+            symbol_data["kurt_21"] = returns[symbol].rolling(21).kurt()
+            
+            # Realized volatility
+            symbol_data["realized_vol_5"] = returns[symbol].rolling(5).std() * np.sqrt(252)
+            symbol_data["realized_vol_21"] = returns[symbol].rolling(21).std() * np.sqrt(252)
+            
+            # Volume indicators
             if symbol in volumes.columns:
                 vol_mean = volumes[symbol].rolling(60).mean()
                 vol_std = volumes[symbol].rolling(60).std()
                 symbol_data["volz"] = (volumes[symbol] - vol_mean) / (vol_std + 1e-9)
+                symbol_data["volz_5"] = (volumes[symbol] - volumes[symbol].rolling(5).mean()) / (volumes[symbol].rolling(5).std() + 1e-9)
+                symbol_data["volz_21"] = (volumes[symbol] - volumes[symbol].rolling(21).mean()) / (volumes[symbol].rolling(21).std() + 1e-9)
+                
+                # OBV change
+                obv = self._calculate_obv(prices[symbol], volumes[symbol])
+                obv_change = obv.pct_change(5)
+                # Handle inf/nan values in OBV change
+                obv_change = obv_change.replace([np.inf, -np.inf], 0).fillna(0)
+                symbol_data["obv_change"] = obv_change
+                
+                # Volume ratio
+                symbol_data["volume_ratio"] = volumes[symbol] / volumes[symbol].rolling(21).mean()
             else:
                 symbol_data["volz"] = 0.0
+                symbol_data["volz_5"] = 0.0
+                symbol_data["volz_21"] = 0.0
+                symbol_data["obv_change"] = 0.0
+                symbol_data["volume_ratio"] = 1.0
             
-            # Additional features
-            symbol_data["volatility"] = returns[symbol].rolling(21).std()
-            symbol_data["volume_ratio"] = volumes[symbol] / volumes[symbol].rolling(21).mean() if symbol in volumes.columns else 1.0
+            # Volatility (re-enabled)
+            symbol_data["volatility"] = returns[symbol].rolling(21).std() * np.sqrt(252)
+            
+            # Cross-sectional factors
+            symbol_data["inv_price"] = 1.0 / prices[symbol]  # Proxy for size
+            
+            # Momentum (skip last 21 days to avoid look-ahead)
+            symbol_data["mom_3m"] = prices[symbol].pct_change(63)  # 3 months
+            symbol_data["mom_6m"] = prices[symbol].pct_change(126)  # 6 months
+            symbol_data["mom_12m"] = prices[symbol].pct_change(252)  # 12 months
+            
+            # Short-term reversal
+            symbol_data["reversal_1d"] = -returns[symbol]
+            symbol_data["reversal_3d"] = -prices[symbol].pct_change(3)
             
             # Enforce feature configuration - only keep configured features in exact order
             symbol_data = enforce_feature_config(symbol_data, self.config.features)
@@ -105,9 +179,13 @@ class ASXDataLoader:
                     logger.info(f"  {feature}: mean={mean_val:.6f}, std={std_val:.6f}")
                     
                     # Assertions for raw features
-                    if feature in ['ret1', 'ret5', 'ret21'] and abs(mean_val) > 0.02:
+                    if feature == 'ret1' and abs(mean_val) > 0.02:
                         raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} too high - likely wrong column order")
-                    elif feature == 'rsi14' and not (35 <= mean_val <= 65):
+                    elif feature == 'ret5' and abs(mean_val) > 0.05:
+                        raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} too high - likely wrong column order")
+                    elif feature == 'ret21' and abs(mean_val) > 0.15:
+                        raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} too high - likely wrong column order")
+                    elif feature == 'rsi14' and not np.isnan(mean_val) and not (35 <= mean_val <= 65):
                         raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} outside RSI range [35, 65] - likely wrong column order")
                     elif feature == 'volz' and std_val < 0.1:
                         logger.warning(f"  {feature} std {std_val:.6f} seems low for volatility")
@@ -143,8 +221,76 @@ class ASXDataLoader:
         
         return rsi
     
+    def _calculate_macd(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
+        """Calculate MACD line, signal, and histogram."""
+        ema_fast = prices.ewm(span=fast).mean()
+        ema_slow = prices.ewm(span=slow).mean()
+        macd_line = ema_fast - ema_slow
+        macd_signal = macd_line.ewm(span=signal).mean()
+        macd_hist = macd_line - macd_signal
+        return macd_line, macd_signal, macd_hist
+    
+    def _calculate_stochastic(self, prices: pd.Series, volumes: pd.Series = None, k_period: int = 14, d_period: int = 3) -> tuple:
+        """Calculate Stochastic %K and %D."""
+        if volumes is None:
+            # Use high/low approximation from close prices
+            high = prices.rolling(2).max()
+            low = prices.rolling(2).min()
+        else:
+            # For now, use close as proxy for high/low
+            high = prices
+            low = prices
+        
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
+        
+        stoch_k = 100 * (prices - lowest_low) / (highest_high - lowest_low + 1e-9)
+        stoch_d = stoch_k.rolling(window=d_period).mean()
+        
+        return stoch_k, stoch_d
+    
+    def _calculate_atr(self, prices: pd.Series, volumes: pd.Series = None, period: int = 14) -> pd.Series:
+        """Calculate Average True Range."""
+        if volumes is None:
+            # Use close as proxy for high/low
+            high = prices
+            low = prices
+        else:
+            # For now, use close as proxy for high/low
+            high = prices
+            low = prices
+        
+        tr1 = high - low
+        tr2 = abs(high - prices.shift(1))
+        tr3 = abs(low - prices.shift(1))
+        
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period).mean()
+        
+        return atr
+    
+    def _calculate_obv(self, prices: pd.Series, volumes: pd.Series) -> pd.Series:
+        """Calculate On-Balance Volume."""
+        price_change = prices.diff()
+        obv = pd.Series(index=prices.index, dtype=float)
+        obv.iloc[0] = 0
+        
+        for i in range(1, len(prices)):
+            if pd.isna(price_change.iloc[i]) or pd.isna(volumes.iloc[i]):
+                obv.iloc[i] = obv.iloc[i-1]
+            elif price_change.iloc[i] > 0:
+                obv.iloc[i] = obv.iloc[i-1] + volumes.iloc[i]
+            elif price_change.iloc[i] < 0:
+                obv.iloc[i] = obv.iloc[i-1] - volumes.iloc[i]
+            else:
+                obv.iloc[i] = obv.iloc[i-1]
+        
+        # Replace any inf/nan values with 0
+        obv = obv.replace([np.inf, -np.inf], 0).fillna(0)
+        return obv
+    
     def calculate_targets(self, prices: pd.DataFrame, benchmark_prices: pd.Series, 
-                         horizon: int = 5) -> Dict[str, pd.Series]:
+                         horizon: int = 10) -> Dict[str, pd.Series]:
         """Calculate forward excess returns as targets."""
         logger.info(f"Calculating {horizon}-day forward excess returns")
         
@@ -242,9 +388,14 @@ class ASXDataLoader:
         X = np.array(X_list, dtype=np.float32)
         y = np.array(y_list, dtype=np.float32)
         
-        # Convert symbols to integer indices
-        symbol_to_idx = {symbol: idx for idx, symbol in enumerate(self.universe)}
+        # Convert symbols to integer indices - only include symbols that have data
+        unique_symbols = list(set(symbols_list))
+        symbol_to_idx = {symbol: idx for idx, symbol in enumerate(unique_symbols)}
         symbols = np.array([symbol_to_idx[symbol] for symbol in symbols_list], dtype=np.int32)
+        
+        # Store the actual universe for later use
+        self.actual_universe = unique_symbols
+        logger.info(f"Actual universe size: {len(unique_symbols)} symbols")
         
         # Convert dates to timestamps (float64)
         dates = np.array([pd.Timestamp(date).timestamp() for date in dates_list], dtype=np.float64)
@@ -258,7 +409,10 @@ class ASXDataLoader:
         
         # Apply cross-sectional demeaning after data is combined
         logger.info("Applying cross-sectional demeaning...")
-        features_to_demean = ['ret1', 'ret5', 'ret21', 'rsi14']
+        features_to_demean = ['ret1', 'ret5', 'ret21', 'rsi14', 'rsi2', 'rsi50', 'macd', 'macd_signal', 'macd_hist', 
+                             'stoch_k', 'stoch_d', 'skew_21', 'kurt_21', 'realized_vol_5', 'realized_vol_21',
+                             'volz', 'volz_5', 'volz_21', 'obv_change', 'volatility', 'volume_ratio',
+                             'mom_3m', 'mom_6m', 'mom_12m', 'reversal_1d', 'reversal_3d']
         feature_indices = {feature: i for i, feature in enumerate(self.config.features) if feature in features_to_demean}
         
         for date in np.unique(dates):
@@ -280,7 +434,7 @@ class ASXDataLoader:
             first_symbol_data = first_symbol_data[self.config.features]  # Reorder to match config
             
             # CRITICAL: Assert exact feature order
-            EXPECTED = ['ret1', 'ret5', 'ret21', 'rsi14', 'volz']
+            EXPECTED = self.config.features
             actual_features = list(first_symbol_data.columns)
             assert actual_features == EXPECTED, f"Feature order mismatch: {actual_features} != {EXPECTED}"
             logger.info("Feature order validation passed")

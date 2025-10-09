@@ -176,6 +176,12 @@ class ResultsManager:
     def save_predictions(self, predictions: np.ndarray, targets: np.ndarray, 
                         dates: np.ndarray, symbols: np.ndarray):
         """Save predictions to CSV."""
+        # Ensure all arrays are 1-dimensional
+        predictions = np.asarray(predictions).flatten()
+        targets = np.asarray(targets).flatten()
+        dates = np.asarray(dates).flatten()
+        symbols = np.asarray(symbols).flatten()
+        
         df = pd.DataFrame({
             'date': dates,
             'symbol': symbols,

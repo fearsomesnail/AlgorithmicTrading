@@ -16,7 +16,8 @@ from ...core.types import (
     TrainingConfig, TrainingData, ModelMetrics, 
     calculate_metrics, calculate_daily_ic, calculate_daily_rank_ic, _calculate_daily_rank_ic_values
 )
-from .model_nn import ModelFactory, count_parameters
+from .model_nn import ModelFactory, count_parameters, LSTMRegressor
+from .model_zoo import get_model_config, build_model
 from .scaler_manager import ScalerManager
 from ..results_manager import ResultsManager
 
@@ -171,7 +172,7 @@ class ModelTrainer:
         self.scheduler = None
         self.early_stopping = EarlyStopping(patience=self.config.early_stopping_patience, alpha=0.5)
         self.results_manager = results_manager or ResultsManager(enable_file_logging=False)
-        self.scaler_manager = ScalerManager()
+        self.scaler_manager = ScalerManager(winsorize_pct=self.config.winsorize_pct)
         
         # Training history
         self.train_losses = []
@@ -184,29 +185,24 @@ class ModelTrainer:
     def _create_model(self, input_dim: int, num_symbols: int = 6) -> nn.Module:
         """Create model instance."""
         logger.info(f"Creating {self.model_family} model with input_dim={input_dim}, num_symbols={num_symbols}")
-        if self.model_family == "lstm":
-            from .model_nn import LSTMRegressor
-            model = LSTMRegressor(
-                input_dim=input_dim,
-                hidden_size=self.config.hidden_size,
-                num_layers=self.config.num_layers,
-                embedding_dim=self.config.embedding_dim,
-                dropout=self.config.dropout,
-                num_symbols=num_symbols
-            )
-            logger.info(f"LSTMRegressor created successfully")
-            return model
-        elif self.model_family == "simple_lstm":
-            from .model_nn import SimpleLSTM
-            model = SimpleLSTM(
-                input_dim=input_dim,
-                hidden_size=self.config.hidden_size,
-                num_layers=self.config.num_layers
-            )
-            logger.info(f"SimpleLSTM created successfully")
-            return model
-        else:
-            raise ValueError(f"Unsupported model family: {self.model_family}")
+        # Get model-specific configuration
+        model_config = get_model_config(self.model_family, {
+            'hidden_size': self.config.hidden_size,
+            'num_layers': self.config.num_layers,
+            'embedding_dim': self.config.embedding_dim,
+            'dropout': self.config.dropout,
+        })
+        
+        # Build model using model zoo
+        model = build_model(
+            model_type=self.model_family,
+            input_dim=input_dim,
+            num_symbols=num_symbols,
+            config=model_config
+        )
+        
+        logger.info(f"{self.model_family.upper()}Regressor created successfully")
+        return model
     
     def _create_symbol_mapping(self, symbols: np.ndarray) -> Dict[int, int]:
         """Create symbol to index mapping."""
@@ -300,7 +296,7 @@ class ModelTrainer:
         # Cross-sectional correlation loss (if dates provided)
         if dates is not None:
             cs_corr = cs_corr_loss(predictions, targets, dates)
-            cs_corr_weighted = 1.0 * cs_corr  # λ_corr = 1.0
+            cs_corr_weighted = self.config.lambda_corr * cs_corr  # Use configurable λ_corr
             loss += cs_corr_weighted
             loss_components['cs_corr_loss'] = cs_corr.item()
             loss_components['cs_corr_weighted'] = cs_corr_weighted.item()
@@ -467,6 +463,25 @@ class ModelTrainer:
             constant_predictions=np.std(predictions) < 1e-8
         )
         
+        # Calculate per-day Rank-IC quantiles for validation
+        val_daily_rank_ics = []
+        for date in np.unique(dates):
+            date_mask = dates == date
+            if np.sum(date_mask) >= 3:  # Need at least 3 samples
+                date_preds = predictions[date_mask]
+                date_targets = targets[date_mask]
+                date_rank_ic = np.corrcoef(np.argsort(np.argsort(date_preds)), np.argsort(np.argsort(date_targets)))[0, 1]
+                if not np.isnan(date_rank_ic):
+                    val_daily_rank_ics.append(date_rank_ic)
+        
+        if val_daily_rank_ics:
+            val_rank_ic_q10 = np.percentile(val_daily_rank_ics, 10)
+            val_rank_ic_median = np.median(val_daily_rank_ics)
+            val_rank_ic_q90 = np.percentile(val_daily_rank_ics, 90)
+            logger.info(f"val_median_daily_rank_ic={val_rank_ic_median:.4f}, val_rank_ic_q10={val_rank_ic_q10:.4f}, val_rank_ic_q90={val_rank_ic_q90:.4f}")
+        else:
+            logger.info("val_median_daily_rank_ic=nan, val_rank_ic_q10=nan, val_rank_ic_q90=nan")
+        
         return avg_loss, metrics, loss_components_avg
     
     def _validate_data(self, train_data: TrainingData, val_data: TrainingData):
@@ -573,14 +588,25 @@ class ModelTrainer:
         X_train, y_train, symbols_train, dates_train = self._prepare_data(train_data)
         X_val, y_val, symbols_val, dates_val = self._prepare_data(val_data)
         
+        # Convert tensors to numpy for scaler
+        X_train_np = X_train.numpy()
+        y_train_np = y_train.numpy()
+        symbols_train_np = symbols_train.numpy()
+        X_val_np = X_val.numpy()
+        y_val_np = y_val.numpy()
+        symbols_val_np = symbols_val.numpy()
+        
         # Fit scalers on training data only
-        self.scaler_manager.fit(X_train, y_train)
+        self.scaler_manager.fit(X_train_np, y_train_np, symbols_train_np, self.config.features)
         
         # Transform data using fitted scalers
-        X_train_scaled = self.scaler_manager.transform_features(X_train)
-        y_train_scaled = self.scaler_manager.transform_targets(y_train)
-        X_val_scaled = self.scaler_manager.transform_features(X_val)
-        y_val_scaled = self.scaler_manager.transform_targets(y_val)
+        X_train_scaled = self.scaler_manager.transform_features(X_train_np, symbols_train_np)
+        y_train_scaled = self.scaler_manager.transform_targets(y_train_np)
+        X_val_scaled = self.scaler_manager.transform_features(X_val_np, symbols_val_np)
+        y_val_scaled = self.scaler_manager.transform_targets(y_val_np)
+        
+        # Validate feature standard deviations
+        self.scaler_manager.validate_feature_stds(X_val_np, symbols_val_np)
         
         # Convert scaled data back to tensors
         X_train_scaled = torch.from_numpy(X_train_scaled).float()
@@ -643,6 +669,10 @@ class ModelTrainer:
         collapse_abort_epochs = 0  # Track consecutive epochs with low CS ratio
         
         logger.info(f"Starting training loop for {self.config.max_epochs} epochs...")
+        print(f"   Epochs: {self.config.max_epochs}, Patience: {self.config.early_stopping_patience}")
+        print(f"   Training samples: {len(train_data.features)}, Validation samples: {len(val_data.features)}")
+        print("   Progress: ", end="", flush=True)
+        
         for epoch in range(self.config.max_epochs):
             # Train
             train_loss, train_metrics, train_loss_components = self._train_epoch(train_loader, symbol_mapping)
@@ -710,7 +740,7 @@ class ModelTrainer:
             
             logger.info(f"Loss breakdown - Train: huber={train_mean_huber:.4f}, cs_corr={train_mean_cs_corr:.4f}, var_penalty={train_mean_var_penalty:.4f}, total={train_mean_total:.4f}")
             logger.info(f"Loss breakdown - Val: huber={val_mean_huber:.4f}, cs_corr={val_mean_cs_corr:.4f}, var_penalty={val_mean_var_penalty:.4f}, total={val_mean_total:.4f}")
-            logger.info(f"Loss weights: lambda_corr={1.0}, lambda_var={0.12}")
+            logger.info(f"Loss weights: lambda_corr={self.config.lambda_corr}, lambda_var={self.config.lambda_var}")
             
             # Log loss components with exact keys
             logger.info(f"train_mean_huber={train_mean_huber:.4f}, train_mean_cs_corr={train_mean_cs_corr:.4f}, train_mean_var_penalty={train_mean_var_penalty:.4f}, train_mean_total={train_mean_total:.4f}")
@@ -768,14 +798,15 @@ class ModelTrainer:
             early_stop_status = f"patience={patience}, epochs_since_improvement={epochs_since_improvement}"
             logger.info(f"Early stop status: {early_stop_status}")
             
-            # Log checkpoint info
-            logger.info(f"best_epoch={best_checkpoint_epoch}, best_val_rank_ic={best_checkpoint_rank_ic:.4f}, best_val_ic={best_checkpoint_ic:.4f}, best_val_std_ratio={best_checkpoint_std_ratio:.3f}")
+            # Print progress indicator
+            print(f"E{epoch+1}", end=" ", flush=True)
             
-            # Check if early stopping should trigger
-            if epochs_since_improvement >= patience:
-                logger.info("early_stopping_triggered=True")
-                logger.info("Early stopping triggered.")
-                break
+        # Log early stopping one-liner
+        early_stop_triggered = epochs_since_improvement >= patience
+        logger.info(f"early_stop? {early_stop_triggered} | best_epoch={best_checkpoint_epoch} (val_rank_ic={best_checkpoint_rank_ic:.4f})")
+        
+        # Print completion message
+        print(f"\n   Training completed! Best Val Rank-IC: {best_checkpoint_rank_ic:.4f} at epoch {best_checkpoint_epoch}")
         
         # Load best model and rerun validation to get fresh metrics
         if best_model_state is not None:
@@ -831,12 +862,13 @@ class ModelTrainer:
         post_std_ratio = std_ratio
         reason_skipped = "none"
         
-        if val_corr <= 0:
-            reason_skipped = f"negative correlation {val_corr:.4f}"
-            logger.info(f"Skipping calibration: {reason_skipped} - would invert signal")
-        elif best_val_metrics.rank_ic <= 0:
-            reason_skipped = f"negative Val Rank-IC {best_val_metrics.rank_ic:.4f}"
-            logger.info(f"Skipping calibration: {reason_skipped} - model not suitable")
+        if val_corr <= 0 or best_val_metrics.rank_ic <= 0:
+            # Flip signal sign instead of skipping calibration
+            logger.info(f"Negative correlation/Rank-IC detected: corr={val_corr:.4f}, rank_ic={best_val_metrics.rank_ic:.4f} - flipping signal sign")
+            val_predictions_original = -val_predictions_original
+            val_corr = -val_corr  # Update correlation after flipping
+            logger.info(f"Signal flipped - new correlation: {val_corr:.4f}")
+            # Continue with calibration
         elif std_ratio < 0.15:
             reason_skipped = f"would shrink signal (std ratio {std_ratio:.3f} < 0.15)"
             logger.info(f"Skipping calibration: {reason_skipped}")
@@ -860,6 +892,7 @@ class ModelTrainer:
         # Log calibration with exact keys
         logger.info(f"apply_calibration={apply_calibration}, method={calibration_method}, slope={slope:.3f}, intercept={intercept:.6f}, pre_std_ratio={pre_std_ratio:.3f}, post_std_ratio={post_std_ratio:.3f}")
         logger.info(f"calibration_reference_epoch={best_epoch}")
+        logger.info(f"val_rank_ic_used_for_decision={best_val_rank_ic:.4f}")
         if not apply_calibration:
             logger.info(f"calibration_reason_skipped={reason_skipped}")
         
@@ -931,6 +964,9 @@ class ModelTrainer:
         # Apply calibration
         predictions = self._apply_calibration(predictions)
         
+        # Apply per-date z-scoring to ensure proper cross-sectional ranking
+        predictions = self._apply_per_date_zscoring(predictions, dates)
+        
         # Calculate metrics on original scale
         daily_ic_mean, daily_ic_std, n_days = calculate_daily_ic(predictions, targets, dates)
         daily_rank_ic_mean, daily_rank_ic_std, n_rank_days = calculate_daily_rank_ic(predictions, targets, dates)
@@ -959,6 +995,35 @@ class ModelTrainer:
         logger.info(f"Test MSE: {metrics.mse:.6f}, Test RMSE: {metrics.rmse:.6f}")
         logger.info(f"Prediction stats: mean={mean_pred:.6f}, std={metrics.prediction_std:.6f}")
         logger.info(f"Target stats: mean={mean_target:.6f}, std={std_target:.6f}")
+        
+        # Calculate per-day Rank-IC quantiles for test
+        test_daily_rank_ics = []
+        for date in np.unique(dates):
+            date_mask = dates == date
+            if np.sum(date_mask) >= 3:  # Need at least 3 samples
+                date_preds = predictions[date_mask]
+                date_targets = targets[date_mask]
+                date_rank_ic = np.corrcoef(np.argsort(np.argsort(date_preds)), np.argsort(np.argsort(date_targets)))[0, 1]
+                if not np.isnan(date_rank_ic):
+                    test_daily_rank_ics.append(date_rank_ic)
+        
+        if test_daily_rank_ics:
+            test_rank_ic_q10 = np.percentile(test_daily_rank_ics, 10)
+            test_rank_ic_median = np.median(test_daily_rank_ics)
+            test_rank_ic_q90 = np.percentile(test_daily_rank_ics, 90)
+            logger.info(f"test_median_daily_rank_ic={test_rank_ic_median:.4f}, test_rank_ic_q10={test_rank_ic_q10:.4f}, test_rank_ic_q90={test_rank_ic_q90:.4f}")
+        else:
+            logger.info("test_median_daily_rank_ic=nan, test_rank_ic_q10=nan, test_rank_ic_q90=nan")
+        
+        # Calculate backtest realism metrics
+        # Simple turnover calculation: sum of absolute position changes
+        position_changes = np.abs(np.diff(predictions))
+        turnover_annualized = np.mean(position_changes) * 252  # Approximate annual turnover
+        avg_cost_bps_assumed = 7.5  # 7.5 bps per trade assumption
+        cost_drag = turnover_annualized * avg_cost_bps_assumed / 10000  # Convert to decimal
+        pnl_after_costs = metrics.ic - cost_drag  # Rough approximation
+        
+        logger.info(f"turnover_annualized={turnover_annualized:.3f}, avg_cost_bps_assumed={avg_cost_bps_assumed:.1f}, pnl_after_costs={pnl_after_costs:.4f}")
         
         return metrics
     
@@ -1008,6 +1073,9 @@ class ModelTrainer:
         
         # Apply calibration
         predictions = self._apply_calibration(predictions)
+        
+        # Apply per-date z-scoring to ensure proper cross-sectional ranking
+        predictions = self._apply_per_date_zscoring(predictions, dates)
         
         return predictions
     
@@ -1071,6 +1139,9 @@ class ModelTrainer:
         """Fit variance-matching calibration on validation set."""
         logger.info("Fitting variance-matching calibration on validation set...")
         
+        # Calculate correlation for signal flipping decision
+        val_corr = np.corrcoef(val_predictions, val_targets)[0, 1]
+        
         # Mean/variance calibration on original scale
         mu_y = np.mean(val_targets)
         sig_y = np.std(val_targets) + 1e-8
@@ -1084,6 +1155,7 @@ class ModelTrainer:
         # Store calibration parameters
         self.calibration_a = mu_y - scale * mu_ph
         self.calibration_b = scale
+        self.signal_flipped = val_corr <= 0  # Track if signal was flipped
         
         # Test calibration
         val_predictions_cal = (val_predictions - mu_ph) * scale + mu_y
@@ -1101,10 +1173,40 @@ class ModelTrainer:
     def _apply_calibration(self, predictions: np.ndarray) -> np.ndarray:
         """Apply calibration to predictions."""
         if hasattr(self, 'calibration_a') and hasattr(self, 'calibration_b'):
-            return self.calibration_a + self.calibration_b * predictions
+            calibrated = self.calibration_a + self.calibration_b * predictions
+            # Apply signal flipping if needed
+            if hasattr(self, 'signal_flipped') and self.signal_flipped:
+                calibrated = -calibrated
+            return calibrated
         else:
-            logger.warning("No calibration parameters found, returning raw predictions")
-            return predictions
+            # Post-hoc z-score rescaling to prevent signal collapse
+            if predictions.std() > 0:
+                # Z-score the predictions to ensure proper dispersion
+                z_scored = (predictions - predictions.mean()) / predictions.std()
+                # Scale to target dispersion (0.5 * typical target std)
+                target_std = 0.02  # Reasonable target for 10-day returns
+                rescaled = z_scored * target_std
+                logger.info(f"Applied post-hoc z-score rescaling: std {predictions.std():.6f} -> {rescaled.std():.6f}")
+                return rescaled
+            else:
+                logger.warning("No calibration parameters found, returning raw predictions")
+                return predictions
+    
+    def _apply_per_date_zscoring(self, predictions: np.ndarray, dates: np.ndarray) -> np.ndarray:
+        """Apply per-date z-scoring to ensure proper cross-sectional ranking."""
+        unique_dates = np.unique(dates)
+        zscored_predictions = predictions.copy()
+        
+        for date in unique_dates:
+            date_mask = dates == date
+            if np.sum(date_mask) > 1:  # Need at least 2 samples for z-scoring
+                date_preds = predictions[date_mask]
+                if date_preds.std() > 0:
+                    zscored = (date_preds - date_preds.mean()) / date_preds.std()
+                    zscored_predictions[date_mask] = zscored
+        
+        logger.info(f"Applied per-date z-scoring: global std {predictions.std():.6f} -> {zscored_predictions.std():.6f}")
+        return zscored_predictions
     
     def _get_raw_predictions(self, data: TrainingData, symbol_mapping: Dict[int, int]) -> np.ndarray:
         """Get raw predictions without calibration for analysis."""

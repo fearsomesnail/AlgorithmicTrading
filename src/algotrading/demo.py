@@ -33,25 +33,38 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
     # Set seeds for reproducibility
     set_seeds(42)
     
-    # Configuration - use improved defaults
+    # Configuration
     config = TrainingConfig(
         sequence_length=30,
-        horizon_days=5,
-        # Use improved defaults from TrainingConfig
-        max_epochs=10 if quick else 15,
-        early_stopping_patience=4
+        horizon_days=10,  # Use 10-day horizon as per improvements
+        hidden_size=64,
+        num_layers=2,
+        learning_rate=1e-3,
+        batch_size=256,
+        max_epochs=10 if quick else 20,
+        early_stopping_patience=5
     )
     
     if quick:
-        print("Running in QUICK mode (reduced epochs and data)")
-        config.max_epochs = 5
+        print("Running in QUICK mode (reduced epochs, data, and universe)")
+        config.max_epochs = 10
         config.batch_size = 512  # Larger batches for speed
+        # Use 20 stocks for better cross-sectional learning (faster than 50)
+        config.universe_size = 20
     
     print(f"Configuration: {config}")
     
     # Load data
     print("\n1. Loading data...")
     loader = ASXDataLoader(config)
+    
+    # Limit universe size for quick mode
+    if quick and hasattr(config, 'universe_size'):
+        original_universe = loader.universe.copy()
+        loader.universe = loader.universe[:config.universe_size]
+        print(f"   Using only {len(loader.universe)} stocks for quick testing")
+        print(f"   Selected stocks: {loader.universe}")
+    
     training_data = loader.load_training_data(start_date="2018-01-01")
     
     print(f"Loaded {len(training_data.features)} training sequences")
@@ -75,9 +88,18 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
     
     # Train LSTM model
     print("\n4. Training LSTM model...")
+    print("   This may take several minutes. Progress will be shown below...")
     results_manager = ResultsManager(enable_file_logging=True)
     trainer = ModelTrainer(config, model_family="lstm", results_manager=results_manager)
-    history = trainer.train(train_data, val_data, num_symbols=6)
+    
+    # Get actual number of symbols from the data
+    actual_num_symbols = len(set(train_data.symbols))
+    print(f"   Training with {actual_num_symbols} symbols...")
+    
+    # Update the trainer's symbol mapping to match the actual data
+    trainer.symbol_mapping = {symbol: idx for idx, symbol in enumerate(set(train_data.symbols))}
+    
+    history = trainer.train(train_data, val_data, num_symbols=actual_num_symbols)
     
     print("LSTM training completed!")
     print(f"Final train loss: {history['train_losses'][-1]:.6f}")
@@ -221,7 +243,7 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
         results_manager.save_non_tradeable_status(ratio, pred_cs, tgt_cs)
         
         # Save training plots and finalize results
-        results_manager.save_training_plots(history)
+        results_manager.save_training_plots(history.get('training_history', []))
         results_dir = results_manager.finalize_results()
         print(f"\nResults saved to: {results_dir}")
         
@@ -229,14 +251,7 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
         print("\n" + "=" * 60)
         print("DEMO COMPLETED - MODEL NON-TRADEABLE")
         print("=" * 60)
-        
-        return {
-            'test_metrics': test_metrics,
-            'baseline_metrics': baseline_test_metrics,
-            'backtest_metrics': None,  # No backtest due to model collapse
-            'history': history,
-            'results_dir': results_dir
-        }
+        return
     
     # Calculate backtest metrics (only if not collapsed)
     metrics_calc = BacktestMetrics()
@@ -284,7 +299,7 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
     print(f"  - Add more symbols to the universe")
     
     # Save training plots and finalize results
-    results_manager.save_training_plots(history)
+    results_manager.save_training_plots(history.get('training_history', []))
     results_dir = results_manager.finalize_results()
     print(f"\nResults saved to: {results_dir}")
     

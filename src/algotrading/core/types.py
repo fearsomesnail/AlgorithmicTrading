@@ -22,17 +22,21 @@ class TrainingConfig:
     hidden_size: int = 32  # Further reduced for tiny cross-section
     num_layers: int = 1    # Keep single layer
     embedding_dim: int = 12
-    dropout: float = 0.05  # Further reduced to avoid over-shrinking outputs
+    dropout: float = 0.2   # Increased for better regularization in small universes
     
     # Training parameters
     learning_rate: float = 3e-4  # Lower LR for stability
     batch_size: int = 6    # Exactly one day per batch for cross-sectional training
-    max_epochs: int = 20   # More epochs with cosine+warmup
-    early_stopping_patience: int = 4  # Shorter patience
-    weight_decay: float = 1e-5  # Reduced for tiny cross-section
+    max_epochs: int = 50   # More epochs for better convergence
+    early_stopping_patience: int = 10  # Longer patience to allow learning
+    weight_decay: float = 0.0  # Turn off weight decay to prevent over-regularization
+    head_l1_lambda: float = 0.0  # Turn off L1 regularization to prevent over-regularization
+    rank_ic_ema_span: int = 6  # EMA span for early stopping on Rank-IC
+    lambda_corr: float = 0.5  # Reduced correlation loss weight to prevent over-shrinkage
+    lambda_var: float = 0.0  # Turn off variance penalty to allow dispersion
     
     # Data parameters
-    horizon_days: int = 5
+    horizon_days: int = 10
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1
@@ -43,12 +47,29 @@ class TrainingConfig:
     
     # Feature engineering
     features: List[str] = None
+    feature_allowlist: Optional[List[str]] = None  # Override default features
+    winsorize_pct: float = 0.01  # Winsorize at 1%/99%
+    neutralize_exposures: List[str] = None  # e.g., ["market", "size"]
     
     def __post_init__(self):
         if self.features is None:
+            # Lean feature set - drop noisy/redundant features
             self.features = [
-                "ret1", "ret5", "ret21", "rsi14", "volz"
+                'ret1', 'ret5', 'ret21',  # Returns
+                'rsi14', 'rsi2', 'rsi50',  # RSI variants
+                'macd', 'macd_signal',  # MACD (drop macd_hist)
+                'atr14',  # ATR
+                'realized_vol_5', 'realized_vol_21',  # Realized volatility
+                'volz',  # Volume z-score (drop volz_5, volz_21)
+                'volume_ratio',  # Volume ratio
+                'inv_price',  # Size proxy
+                'mom_3m', 'mom_6m', 'mom_12m',  # Momentum
+                'reversal_1d'  # Reversal (drop reversal_3d)
             ]
+        
+        # Apply feature allowlist if provided
+        if self.feature_allowlist is not None:
+            self.features = self.feature_allowlist
 
 
 @dataclass
