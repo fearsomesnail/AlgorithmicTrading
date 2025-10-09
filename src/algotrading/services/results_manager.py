@@ -171,7 +171,7 @@ class ResultsManager:
         self.log_info(f"Non-tradeable status saved to {status_path}")
         backtest_file = os.path.join(self.run_dir, "backtest_results.json")
         with open(backtest_file, 'w') as f:
-            json.dump(backtest_results, f, indent=2, default=str)
+            json.dump(status, f, indent=2, default=str)
     
     def save_predictions(self, predictions: np.ndarray, targets: np.ndarray, 
                         dates: np.ndarray, symbols: np.ndarray):

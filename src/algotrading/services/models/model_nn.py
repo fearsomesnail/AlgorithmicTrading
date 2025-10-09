@@ -39,15 +39,11 @@ class LSTMRegressor(nn.Module):
             dropout=dropout if num_layers > 1 else 0
         )
         
-        # Output head
+        # Output head - linear only for tiny cross-section
         self.head = nn.Sequential(
             nn.LayerNorm(hidden_size),
-            nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, 1)
+            nn.Linear(hidden_size, 1)  # Direct linear mapping, no hidden layer
         )
         
         # Initialize weights

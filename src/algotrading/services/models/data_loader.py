@@ -94,21 +94,31 @@ class ASXDataLoader:
             # CRITICAL: Reorder columns to match config.features exactly
             symbol_data = symbol_data[self.config.features]
             
-            # Log feature statistics for sanity check
-            logger.info(f"Feature statistics for {symbol}:")
+            # Log raw feature statistics BEFORE demeaning
+            logger.info(f"Raw feature statistics for {symbol} (pre-demean):")
+            raw_stats = {}
             for feature in self.config.features:
                 if feature in symbol_data.columns:
                     mean_val = symbol_data[feature].mean()
                     std_val = symbol_data[feature].std()
+                    raw_stats[feature] = {'mean': mean_val, 'std': std_val}
                     logger.info(f"  {feature}: mean={mean_val:.6f}, std={std_val:.6f}")
                     
-                    # HARD VALIDATION CHECKS - FAIL FAST
+                    # Assertions for raw features
                     if feature in ['ret1', 'ret5', 'ret21'] and abs(mean_val) > 0.02:
                         raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} too high - likely wrong column order")
                     elif feature == 'rsi14' and not (35 <= mean_val <= 65):
                         raise ValueError(f"FEATURE ORDER MISMATCH: {feature} mean {mean_val:.6f} outside RSI range [35, 65] - likely wrong column order")
                     elif feature == 'volz' and std_val < 0.1:
                         logger.warning(f"  {feature} std {std_val:.6f} seems low for volatility")
+            
+            # Cross-sectional demeaning will be applied after all symbols are combined
+            logger.info(f"Raw feature statistics for {symbol} (will be cross-sectionally demeaned later):")
+            for feature in self.config.features:
+                if feature in symbol_data.columns:
+                    mean_val = symbol_data[feature].mean()
+                    std_val = symbol_data[feature].std()
+                    logger.info(f"  {feature}: mean={mean_val:.6f}, std={std_val:.6f}")
             
             # Final validation: ensure column order matches config exactly
             if list(symbol_data.columns) != self.config.features:
@@ -245,6 +255,19 @@ class ASXDataLoader:
         y = y[sort_indices]
         symbols = symbols[sort_indices]
         dates = dates[sort_indices]
+        
+        # Apply cross-sectional demeaning after data is combined
+        logger.info("Applying cross-sectional demeaning...")
+        features_to_demean = ['ret1', 'ret5', 'ret21', 'rsi14']
+        feature_indices = {feature: i for i, feature in enumerate(self.config.features) if feature in features_to_demean}
+        
+        for date in np.unique(dates):
+            date_mask = dates == date
+            if np.sum(date_mask) > 1:  # Need at least 2 symbols for demeaning
+                for feature, idx in feature_indices.items():
+                    if idx < X.shape[2]:  # Make sure index is valid
+                        # Demean across symbols for this date
+                        X[date_mask, :, idx] = X[date_mask, :, idx] - np.mean(X[date_mask, :, idx])
         
         logger.info(f"Built {len(X)} sequences with shape {X.shape}")
         logger.info(f"Date range: {pd.Timestamp(dates.min(), unit='s')} to {pd.Timestamp(dates.max(), unit='s')}")

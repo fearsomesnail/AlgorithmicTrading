@@ -33,16 +33,13 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
     # Set seeds for reproducibility
     set_seeds(42)
     
-    # Configuration
+    # Configuration - use improved defaults
     config = TrainingConfig(
         sequence_length=30,
         horizon_days=5,
-        hidden_size=64,
-        num_layers=2,
-        learning_rate=1e-3,
-        batch_size=256,
-        max_epochs=10 if quick else 20,
-        early_stopping_patience=5
+        # Use improved defaults from TrainingConfig
+        max_epochs=10 if quick else 15,
+        early_stopping_patience=4
     )
     
     if quick:
@@ -224,7 +221,7 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
         results_manager.save_non_tradeable_status(ratio, pred_cs, tgt_cs)
         
         # Save training plots and finalize results
-        results_manager.save_training_plots(history.get('training_history', []))
+        results_manager.save_training_plots(history)
         results_dir = results_manager.finalize_results()
         print(f"\nResults saved to: {results_dir}")
         
@@ -232,7 +229,14 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
         print("\n" + "=" * 60)
         print("DEMO COMPLETED - MODEL NON-TRADEABLE")
         print("=" * 60)
-        return
+        
+        return {
+            'test_metrics': test_metrics,
+            'baseline_metrics': baseline_test_metrics,
+            'backtest_metrics': None,  # No backtest due to model collapse
+            'history': history,
+            'results_dir': results_dir
+        }
     
     # Calculate backtest metrics (only if not collapsed)
     metrics_calc = BacktestMetrics()
@@ -280,7 +284,7 @@ def run_demo(quick=False, no_backtest=False, no_calibration=True):
     print(f"  - Add more symbols to the universe")
     
     # Save training plots and finalize results
-    results_manager.save_training_plots(history.get('training_history', []))
+    results_manager.save_training_plots(history)
     results_dir = results_manager.finalize_results()
     print(f"\nResults saved to: {results_dir}")
     

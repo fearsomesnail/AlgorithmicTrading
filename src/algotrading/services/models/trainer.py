@@ -9,6 +9,8 @@ from typing import Dict, List, Tuple, Optional
 import logging
 from datetime import datetime
 import os
+import math
+from collections import defaultdict
 
 from ...core.types import (
     TrainingConfig, TrainingData, ModelMetrics, 
@@ -21,19 +23,131 @@ from ..results_manager import ResultsManager
 logger = logging.getLogger(__name__)
 
 
-class EarlyStopping:
-    """Early stopping utility."""
+class DateBatchSampler:
+    """Sampler that creates batches with samples from exactly one date."""
     
-    def __init__(self, patience: int = 10, min_delta: float = 1e-6):
+    def __init__(self, dates: torch.Tensor, batch_size: int = 6):
+        self.dates = dates
+        self.batch_size = batch_size
+        
+        # Group indices by date
+        self.date_to_indices = defaultdict(list)
+        for idx, date in enumerate(dates):
+            self.date_to_indices[date.item()].append(idx)
+        
+        self.unique_dates = list(self.date_to_indices.keys())
+        self.unique_dates.sort()  # Sort for deterministic ordering
+        
+        # Log sampler stats
+        group_sizes = [len(indices) for indices in self.date_to_indices.values()]
+        logger.info(f"DateBatchSampler: groups={len(self.unique_dates)}, group_size_stats min={min(group_sizes)}/median={np.median(group_sizes):.0f}/max={max(group_sizes)}")
+        
+    def __iter__(self):
+        # Create batches by iterating through dates - exactly one date per batch
+        for date in self.unique_dates:
+            indices = self.date_to_indices[date]
+            # Take exactly batch_size samples (or all if fewer)
+            batch_indices = indices[:self.batch_size]
+            if len(batch_indices) >= 3:  # Need at least 3 samples for correlation
+                yield batch_indices
+    
+    def __len__(self):
+        # Count dates with at least 3 samples
+        return sum(1 for indices in self.date_to_indices.values() if len(indices) >= 3)
+
+
+def cs_corr_loss(preds: torch.Tensor, targets: torch.Tensor, dates: torch.Tensor) -> torch.Tensor:
+    """Cross-sectional correlation loss to maximize Pearson corr within each day."""
+    loss = 0.0
+    n_groups = 0
+    
+    for date in torch.unique(dates):
+        mask = dates == date
+        if mask.sum() < 3:  # Need at least 3 samples for correlation
+            continue
+            
+        p = preds[mask]
+        t = targets[mask]
+        
+        # Standardize
+        p = (p - p.mean()) / (p.std() + 1e-6)
+        t = (t - t.mean()) / (t.std() + 1e-6)
+        
+        # 1 - correlation (minimize this = maximize correlation)
+        loss += 1.0 - (p * t).mean()
+        n_groups += 1
+    
+    return loss / max(n_groups, 1)
+
+
+def cs_std_ratio(preds: torch.Tensor, targets: torch.Tensor, dates: torch.Tensor) -> torch.Tensor:
+    """Cross-sectional standard deviation ratio within each day."""
+    ratios = []
+    
+    for date in torch.unique(dates):
+        mask = dates == date
+        if mask.sum() < 3:  # Need at least 3 samples
+            continue
+            
+        p = preds[mask]
+        t = targets[mask]
+        
+        ratio = (p.std() + 1e-6) / (t.std() + 1e-6)
+        ratios.append(ratio)
+    
+    if not ratios:
+        return torch.tensor(1.0, device=preds.device)
+    
+    return torch.stack(ratios).mean()
+
+
+class WarmupCosineScheduler:
+    """Learning rate scheduler with warmup and cosine decay."""
+    
+    def __init__(self, optimizer, warmup_epochs: int = 3, total_epochs: int = 15, 
+                 min_lr_ratio: float = 0.01):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.min_lr_ratio = min_lr_ratio
+        self.base_lr = optimizer.param_groups[0]['lr']
+        self.min_lr = self.base_lr * min_lr_ratio
+        
+    def step(self, epoch: int):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
+        else:
+            # Cosine decay
+            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
+
+class EarlyStopping:
+    """Early stopping utility optimized for Rank-IC with EMA smoothing."""
+    
+    def __init__(self, patience: int = 4, min_delta: float = 1e-6, alpha: float = 0.5):
         self.patience = patience
         self.min_delta = min_delta
-        self.best_loss = float('inf')
+        self.alpha = alpha  # EMA smoothing factor
+        self.best_metric = float('-inf')  # For Rank-IC (higher is better)
         self.counter = 0
         self.early_stop = False
+        self.smoothed_metric = None
     
-    def __call__(self, val_loss: float) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
+    def __call__(self, val_rank_ic: float) -> bool:
+        # Apply EMA smoothing
+        if self.smoothed_metric is None:
+            self.smoothed_metric = val_rank_ic
+        else:
+            self.smoothed_metric = self.alpha * val_rank_ic + (1 - self.alpha) * self.smoothed_metric
+        
+        # Check for improvement
+        if self.smoothed_metric > self.best_metric + self.min_delta:
+            self.best_metric = self.smoothed_metric
             self.counter = 0
         else:
             self.counter += 1
@@ -55,7 +169,7 @@ class ModelTrainer:
         self.model = None
         self.optimizer = None
         self.scheduler = None
-        self.early_stopping = EarlyStopping(patience=10)  # Increased patience for Rank-IC with smoothing
+        self.early_stopping = EarlyStopping(patience=self.config.early_stopping_patience, alpha=0.5)
         self.results_manager = results_manager or ResultsManager(enable_file_logging=False)
         self.scaler_manager = ScalerManager()
         
@@ -147,31 +261,83 @@ class ModelTrainer:
             
         return dataloader
     
-    def _compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute MSE loss with dispersion penalty."""
-        mse_loss = nn.MSELoss()
-        mse = mse_loss(predictions, targets)
+    def _create_dataloader_with_sampler(self, X: torch.Tensor, y: torch.Tensor, symbols: torch.Tensor, 
+                                       dates: torch.Tensor, sampler) -> DataLoader:
+        """Create DataLoader with custom sampler."""
+        try:
+            logger.info("About to create TensorDataset...")
+            dataset = TensorDataset(X, y, symbols, dates)
+            logger.info(f"Dataset created successfully")
+        except Exception as e:
+            logger.error(f"Error creating TensorDataset: {e}")
+            logger.error(f"X type: {type(X)}, y type: {type(y)}, symbols type: {type(symbols)}, dates type: {type(dates)}")
+            logger.error(f"X dtype: {X.dtype}, y dtype: {y.dtype}, symbols dtype: {symbols.dtype}, dates dtype: {dates.dtype}")
+            raise
         
-        # Add dispersion penalty to encourage prediction variance
-        pred_std = torch.std(predictions)
-        target_std = torch.std(targets)
-        
-        # Penalize if prediction std is too low relative to target std
-        dispersion_penalty = 0.0
-        if target_std > 1e-6:  # Avoid division by zero
-            dispersion_ratio = pred_std / (target_std + 1e-6)
-            if dispersion_ratio < 0.1:  # If predictions are too flat
-                dispersion_penalty = 0.1 * (0.1 - dispersion_ratio) ** 2
-        
-        return mse + dispersion_penalty
+        try:
+            logger.info("About to create DataLoader with sampler...")
+            dataloader = DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                drop_last=False
+            )
+            logger.info(f"DataLoader with sampler created successfully")
+        except Exception as e:
+            logger.error(f"Error creating DataLoader with sampler: {e}")
+            raise
+            
+        return dataloader
     
-    def _train_epoch(self, dataloader: DataLoader, symbol_mapping: Dict[str, int]) -> Tuple[float, ModelMetrics]:
+    def _compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor, dates: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute Huber loss with cross-sectional correlation and variance penalties."""
+        # Use Huber loss for robustness against outliers (delta=1.0 for scaled space)
+        huber_loss = nn.SmoothL1Loss(beta=1.0)
+        huber = huber_loss(predictions, targets)
+        loss = huber
+        
+        loss_components = {'huber': huber.item()}
+        
+        # Cross-sectional correlation loss (if dates provided)
+        if dates is not None:
+            cs_corr = cs_corr_loss(predictions, targets, dates)
+            cs_corr_weighted = 1.0 * cs_corr  # λ_corr = 1.0
+            loss += cs_corr_weighted
+            loss_components['cs_corr_loss'] = cs_corr.item()
+            loss_components['cs_corr_weighted'] = cs_corr_weighted.item()
+            
+            # Cross-sectional variance penalty
+            cs_ratio = cs_std_ratio(predictions, targets, dates)
+            var_penalty = torch.clamp(0.25 - cs_ratio, min=0).pow(2)
+            var_penalty_weighted = 0.12 * var_penalty  # λ_var = 0.12
+            loss += var_penalty_weighted
+            loss_components['var_penalty'] = var_penalty.item()
+            loss_components['var_penalty_weighted'] = var_penalty_weighted.item()
+            loss_components['cs_ratio'] = cs_ratio.item()
+        else:
+            # Fallback to global variance penalty if no dates
+            pred_std = torch.std(predictions)
+            target_std = torch.std(targets).detach().clamp_min(1e-6)
+            ratio = pred_std / target_std
+            var_penalty = (1.0 - ratio).clamp(min=0).pow(2)
+            var_penalty_weighted = 0.05 * var_penalty
+            loss += var_penalty_weighted
+            loss_components['var_penalty'] = var_penalty.item()
+            loss_components['var_penalty_weighted'] = var_penalty_weighted.item()
+            loss_components['cs_ratio'] = ratio.item()
+        
+        loss_components['total_loss'] = loss.item()
+        return loss, loss_components
+    
+    def _train_epoch(self, dataloader: DataLoader, symbol_mapping: Dict[str, int]) -> Tuple[float, ModelMetrics, Dict[str, float]]:
         """Train for one epoch."""
         self.model.train()
         total_loss = 0.0
         all_predictions = []
         all_targets = []
         all_dates = []
+        
+        # Collect loss components for logging
+        loss_components_avg = {}
         
         for batch_X, batch_y, batch_symbols, batch_dates in dataloader:
             batch_X = batch_X.to(self.device)
@@ -192,7 +358,13 @@ class ModelTrainer:
             # Forward pass
             self.optimizer.zero_grad()
             predictions = self.model(batch_X, symbol_indices)
-            loss = self._compute_loss(predictions, batch_y)
+            loss, loss_components = self._compute_loss(predictions, batch_y, batch_dates)
+            
+            # Accumulate loss components
+            for key, value in loss_components.items():
+                if key not in loss_components_avg:
+                    loss_components_avg[key] = 0.0
+                loss_components_avg[key] += value
             
             # Backward pass
             loss.backward()
@@ -224,18 +396,22 @@ class ModelTrainer:
             rmse=float(np.sqrt(np.mean((predictions - targets) ** 2))),
             n_samples=len(predictions),
             prediction_std=float(np.std(predictions)),
+            target_std=float(np.std(targets)),
             constant_predictions=np.std(predictions) < 1e-8
         )
         
-        return avg_loss, metrics
+        return avg_loss, metrics, loss_components_avg
     
-    def _validate_epoch(self, dataloader: DataLoader, symbol_mapping: Dict[str, int]) -> Tuple[float, ModelMetrics]:
+    def _validate_epoch(self, dataloader: DataLoader, symbol_mapping: Dict[str, int]) -> Tuple[float, ModelMetrics, Dict[str, float]]:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
         all_predictions = []
         all_targets = []
         all_dates = []
+        
+        # Collect loss components for logging
+        loss_components_avg = {}
         
         with torch.no_grad():
             for batch_X, batch_y, batch_symbols, batch_dates in dataloader:
@@ -250,7 +426,13 @@ class ModelTrainer:
                 
                 # Forward pass
                 predictions = self.model(batch_X, symbol_indices)
-                loss = self._compute_loss(predictions, batch_y)
+                loss, loss_components = self._compute_loss(predictions, batch_y, batch_dates)
+                
+                # Accumulate loss components
+                for key, value in loss_components.items():
+                    if key not in loss_components_avg:
+                        loss_components_avg[key] = 0.0
+                    loss_components_avg[key] += value
                 
                 total_loss += loss.item()
                 
@@ -260,6 +442,10 @@ class ModelTrainer:
                 all_dates.extend(batch_dates.detach().cpu().numpy())
         
         avg_loss = total_loss / len(dataloader)
+        
+        # Average loss components
+        for key in loss_components_avg:
+            loss_components_avg[key] /= len(dataloader)
         
         # Calculate daily IC metrics
         predictions = np.array(all_predictions)
@@ -277,10 +463,11 @@ class ModelTrainer:
             rmse=float(np.sqrt(np.mean((predictions - targets) ** 2))),
             n_samples=len(predictions),
             prediction_std=float(np.std(predictions)),
+            target_std=float(np.std(targets)),
             constant_predictions=np.std(predictions) < 1e-8
         )
         
-        return avg_loss, metrics
+        return avg_loss, metrics, loss_components_avg
     
     def _validate_data(self, train_data: TrainingData, val_data: TrainingData):
         """Validate data integrity and check for leakage."""
@@ -402,8 +589,13 @@ class ModelTrainer:
         y_val_scaled = torch.from_numpy(y_val_scaled).float()
         
         # Log scaling statistics
-        logger.info(f"Training data - Features std: {X_train_scaled.std():.6f}, Targets std: {y_train_scaled.std():.6f}")
-        logger.info(f"Validation data - Features std: {X_val_scaled.std():.6f}, Targets std: {y_val_scaled.std():.6f}")
+        # Per-feature std across samples (not global std)
+        train_feature_stds = torch.std(X_train_scaled, dim=(0, 1)).numpy()  # Per feature across all samples
+        val_feature_stds = torch.std(X_val_scaled, dim=(0, 1)).numpy()
+        logger.info(f"Training data - Feature stds by feature: {train_feature_stds}")
+        logger.info(f"Validation data - Feature stds by feature: {val_feature_stds}")
+        logger.info(f"Training data - Global std: {X_train_scaled.std():.6f}, Targets std: {y_train_scaled.std():.6f}")
+        logger.info(f"Validation data - Global std: {X_val_scaled.std():.6f}, Targets std: {y_val_scaled.std():.6f}")
         
         # Create model
         input_dim = train_data.features.shape[-1]
@@ -418,45 +610,114 @@ class ModelTrainer:
             weight_decay=self.config.weight_decay
         )
         
-        # Create scheduler
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5
+        # Create scheduler with warmup and cosine decay
+        self.scheduler = WarmupCosineScheduler(
+            self.optimizer, 
+            warmup_epochs=3, 
+            total_epochs=self.config.max_epochs,
+            min_lr_ratio=0.01
         )
         
         # Create data loaders with scaled data
         logger.info(f"Creating data loaders...")
-        train_loader = self._create_dataloader(X_train_scaled, y_train_scaled, symbols_train, dates_train, shuffle=True)
+        # Use DateBatchSampler for cross-sectional training
+        train_sampler = DateBatchSampler(dates_train, batch_size=6)
+        train_loader = self._create_dataloader_with_sampler(X_train_scaled, y_train_scaled, symbols_train, dates_train, train_sampler)
         val_loader = self._create_dataloader(X_val_scaled, y_val_scaled, symbols_val, dates_val, shuffle=False)
         logger.info(f"Data loaders created successfully")
         
         logger.info(f"Model created successfully")
         logger.info(f"Model parameters: {count_parameters(self.model):,}")
+        logger.info(f"Head activation: None (linear)")
+        logger.info(f"Feature CS demeaning: True (ret1/5/21/rsi14)")
         logger.info(f"Training samples: {len(train_data.features)}")
         logger.info(f"Validation samples: {len(val_data.features)}")
         
         # Training loop
-        best_val_loss = float('inf')
         best_val_rank_ic = float('-inf')
         best_model_state = None
-        smoothed_rank_ic = None
-        alpha = 0.3  # EMA smoothing factor
+        collapse_abort_epochs = 0  # Track consecutive epochs with low CS ratio
         
         logger.info(f"Starting training loop for {self.config.max_epochs} epochs...")
         for epoch in range(self.config.max_epochs):
             # Train
-            train_loss, train_metrics = self._train_epoch(train_loader, symbol_mapping)
+            train_loss, train_metrics, train_loss_components = self._train_epoch(train_loader, symbol_mapping)
             
             # Validate
-            val_loss, val_metrics = self._validate_epoch(val_loader, symbol_mapping)
+            val_loss, val_metrics, val_loss_components = self._validate_epoch(val_loader, symbol_mapping)
             
-            # Update scheduler
-            self.scheduler.step(val_loss)
+            # Log batching sanity
+            unique_dates_per_batch = []
+            for batch_X, batch_y, batch_symbols, batch_dates in train_loader:
+                unique_dates = len(torch.unique(batch_dates))
+                unique_dates_per_batch.append(unique_dates)
+            
+            avg_unique_dates = np.mean(unique_dates_per_batch) if unique_dates_per_batch else 0
+            pct_one_date = np.mean([d == 1 for d in unique_dates_per_batch]) * 100 if unique_dates_per_batch else 0
+            logger.info(f"Batching: batch_size={self.config.batch_size}, avg_unique_dates_per_batch={avg_unique_dates:.1f}, %batches_with_one_date={pct_one_date:.1f}")
+            
+            # Log optimizer state
+            current_lr = self.optimizer.param_groups[0]['lr']
+            grad_norm = 0.0
+            head_weight_norm = 0.0
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    grad_norm += param.grad.data.norm(2).item() ** 2
+                if 'head' in name and 'weight' in name:
+                    head_weight_norm += param.data.norm(2).item() ** 2
+            grad_norm = grad_norm ** 0.5
+            head_weight_norm = head_weight_norm ** 0.5
+            logger.info(f"Optimizer: lr={current_lr:.2e}, grad_norm={grad_norm:.3f}, head_weight_norm={head_weight_norm:.3f}")
+            
+            # Update scheduler with warmup and cosine decay
+            self.scheduler.step(epoch)
             
             # Store metrics
             self.train_losses.append(train_loss)
             self.val_losses.append(val_loss)
             self.train_metrics.append(train_metrics)
             self.val_metrics.append(val_metrics)
+            
+            # Log variance ratios on both scales and Val Rank-IC EMA
+            train_ratio_scaled = train_metrics.prediction_std / train_metrics.target_std
+            val_ratio_scaled = val_metrics.prediction_std / val_metrics.target_std
+            
+            # Convert to original scale for comparison
+            train_pred_orig = self.scaler_manager.inverse_transform_targets(np.array([train_metrics.prediction_std]))[0]
+            train_tgt_orig = self.scaler_manager.inverse_transform_targets(np.array([train_metrics.target_std]))[0]
+            val_pred_orig = self.scaler_manager.inverse_transform_targets(np.array([val_metrics.prediction_std]))[0]
+            val_tgt_orig = self.scaler_manager.inverse_transform_targets(np.array([val_metrics.target_std]))[0]
+            
+            train_ratio_orig = train_pred_orig / train_tgt_orig if train_tgt_orig > 0 else 0
+            val_ratio_orig = val_pred_orig / val_tgt_orig if val_tgt_orig > 0 else 0
+            
+            smoothed_val = self.early_stopping.smoothed_metric if self.early_stopping.smoothed_metric is not None else 0.0
+            
+            # Log loss breakdown
+            logger.info(f"Loss breakdown - Train: huber={train_loss_components.get('huber', 0):.4f}, cs_corr={train_loss_components.get('cs_corr_loss', 0):.4f}, var_penalty={train_loss_components.get('var_penalty', 0):.4f}, total={train_loss_components.get('total_loss', train_loss):.4f}")
+            logger.info(f"Loss breakdown - Val: huber={val_loss:.4f}")
+            
+            # Log cross-section metrics
+            logger.info(f"Cross-section: Train CS ratio (scaled/orig): {train_ratio_scaled:.3f}/{train_ratio_orig:.3f}, Val CS ratio (scaled/orig): {val_ratio_scaled:.3f}/{val_ratio_orig:.3f}")
+            logger.info(f"Rank-IC: Val={val_metrics.rank_ic:.4f}, Val EMA={smoothed_val:.4f}")
+            
+            # Log per-day Rank-IC quantiles for stability check
+            if hasattr(val_metrics, 'daily_rank_ic') and val_metrics.daily_rank_ic is not None:
+                daily_rank_ic = val_metrics.daily_rank_ic
+                q10 = np.percentile(daily_rank_ic, 10)
+                q50 = np.percentile(daily_rank_ic, 50)
+                q90 = np.percentile(daily_rank_ic, 90)
+                logger.info(f"Per-day Rank-IC quantiles: Q10={q10:.4f}, Q50={q50:.4f}, Q90={q90:.4f}")
+            
+            # Check for cross-sectional collapse abort
+            if val_ratio_orig < 0.18:  # CS ratio threshold
+                collapse_abort_epochs += 1
+                logger.warning(f"Low CS ratio detected: {val_ratio_orig:.3f} < 0.18 (epoch {collapse_abort_epochs}/2)")
+                if collapse_abort_epochs >= 2:
+                    logger.error(f"COLLAPSE ABORT: CS ratio {val_ratio_orig:.3f} < 0.18 for 2+ epochs - stopping training")
+                    break
+            else:
+                collapse_abort_epochs = 0  # Reset counter if ratio improves
             
             # Log progress using ResultsManager
             self.results_manager.log_epoch(
@@ -469,42 +730,69 @@ class ModelTrainer:
                 train_rank_ic=train_metrics.rank_ic
             )
             
-            # Save best model based on Val Rank-IC
-            if val_metrics.rank_ic > best_val_rank_ic:
+            # Save best model based on Val Rank-IC (only if positive)
+            if val_metrics.rank_ic >= 0 and val_metrics.rank_ic > best_val_rank_ic:
                 best_val_rank_ic = val_metrics.rank_ic
                 best_model_state = self.model.state_dict().copy()
                 logger.info(f"New best Val Rank-IC: {best_val_rank_ic:.4f} at epoch {epoch+1}")
+            elif val_metrics.rank_ic < 0:
+                logger.warning(f"Val Rank-IC negative: {val_metrics.rank_ic:.4f} at epoch {epoch+1} - not checkpointing")
             
-            # Early stopping on Val Rank-IC (smoothed with EMA)
-            if smoothed_rank_ic is None:
-                smoothed_rank_ic = val_metrics.rank_ic
-            else:
-                smoothed_rank_ic = alpha * val_metrics.rank_ic + (1 - alpha) * smoothed_rank_ic
-            
-            if self.early_stopping(-smoothed_rank_ic):  # Negative because we want to maximize Rank-IC
-                logger.info(f"Early stopping at epoch {epoch+1} (Val Rank-IC: {val_metrics.rank_ic:.4f}, Smoothed: {smoothed_rank_ic:.4f})")
+            # Early stopping on -EMA(Rank-IC) with EMA smoothing
+            if self.early_stopping(-val_metrics.rank_ic):
+                smoothed_val = -self.early_stopping.smoothed_metric if self.early_stopping.smoothed_metric is not None else 0.0
+                logger.info(f"Early stopping at epoch {epoch+1} (Val Rank-IC: {val_metrics.rank_ic:.4f}, Smoothed: {smoothed_val:.4f})")
                 break
         
         # Load best model
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
             logger.info("Loaded best model state")
+        else:
+            logger.warning("No positive Rank-IC epochs found - model may not be suitable for trading")
         
         # Check if calibration would shrink signal
         val_predictions = self._get_raw_predictions(val_data, symbol_mapping)
         val_targets = val_data.targets
         
-        calib_pred_std = float(np.std(val_predictions))
+        # Fix scale bug: inverse transform predictions to original scale
+        val_predictions_original = self.scaler_manager.inverse_transform_targets(val_predictions)
+        
+        calib_pred_std = float(np.std(val_predictions_original))
         val_target_std = float(np.std(val_targets))
         std_ratio = calib_pred_std / val_target_std if val_target_std > 0 else 0
         
-        if std_ratio < 0.15:
-            logger.info(f"Skipping calibration: would shrink signal (std ratio {std_ratio:.3f} < 0.15)")
-        else:
-            logger.info(f"Calibration would be beneficial (std ratio {std_ratio:.3f} >= 0.15), but skipping for consistency")
+        # Check validation correlation before deciding on calibration
+        val_corr = np.corrcoef(val_predictions_original, val_targets)[0, 1]
+        logger.info(f"Calibration check: val_corr={val_corr:.4f}, std_ratio={std_ratio:.3f}, val_rank_ic={val_metrics.rank_ic:.4f}")
         
-        # Skip calibration to prevent signal shrinkage
-        # self._fit_calibration(val_data, symbol_mapping)
+        apply_calibration = False
+        calibration_method = "none"
+        slope = 1.0
+        intercept = 0.0
+        pre_std_ratio = std_ratio
+        post_std_ratio = std_ratio
+        
+        if val_corr <= 0:
+            logger.info(f"Skipping calibration: negative correlation {val_corr:.4f} - would invert signal")
+        elif val_metrics.rank_ic <= 0:
+            logger.info(f"Skipping calibration: negative Val Rank-IC {val_metrics.rank_ic:.4f} - model not suitable")
+        elif std_ratio < 0.15:
+            logger.info(f"Skipping calibration: would shrink signal (std ratio {std_ratio:.3f} < 0.15)")
+        elif std_ratio <= 0.8:
+            logger.info(f"Applying variance-matching calibration: std ratio {std_ratio:.3f} is beneficial (0.15 <= {std_ratio:.3f} <= 0.8)")
+            self._fit_variance_matching_calibration(val_predictions_original, val_targets)
+            apply_calibration = True
+            calibration_method = "variance_match"
+            slope = self.calibration_b
+            intercept = self.calibration_a
+            # Calculate post-calibration std ratio
+            val_predictions_cal = self._apply_calibration(val_predictions_original)
+            post_std_ratio = np.std(val_predictions_cal) / np.std(val_targets)
+        else:
+            logger.info(f"Skipping calibration: std ratio {std_ratio:.3f} > 0.8 (would over-amplify signal)")
+        
+        logger.info(f"Calibration result: apply={apply_calibration}, method={calibration_method}, slope={slope:.3f}, intercept={intercept:.6f}, pre_std_ratio={pre_std_ratio:.3f}, post_std_ratio={post_std_ratio:.3f}")
         
         return {
             "train_losses": self.train_losses,
@@ -594,6 +882,7 @@ class ModelTrainer:
             rmse=float(np.sqrt(np.mean((predictions - targets) ** 2))),
             n_samples=len(predictions),
             prediction_std=float(np.std(predictions)),
+            target_std=float(np.std(targets)),
             constant_predictions=np.std(predictions) < 1e-8
         )
         
@@ -708,6 +997,37 @@ class ModelTrainer:
         
         if pred_std < 0.25 * target_std:
             logger.warning(f"PREDICTION COLLAPSE: pred_std {pred_std:.6f} < 0.25 * target_std {target_std:.6f}")
+    
+    def _fit_variance_matching_calibration(self, val_predictions: np.ndarray, val_targets: np.ndarray):
+        """Fit variance-matching calibration on validation set."""
+        logger.info("Fitting variance-matching calibration on validation set...")
+        
+        # Mean/variance calibration on original scale
+        mu_y = np.mean(val_targets)
+        sig_y = np.std(val_targets) + 1e-8
+        mu_ph = np.mean(val_predictions)
+        sig_ph = np.std(val_predictions) + 1e-8
+        
+        scale = sig_y / sig_ph
+        # Clamp the gain to avoid collapse/explosion
+        scale = np.clip(scale, 0.5, 3.0)
+        
+        # Store calibration parameters
+        self.calibration_a = mu_y - scale * mu_ph
+        self.calibration_b = scale
+        
+        # Test calibration
+        val_predictions_cal = (val_predictions - mu_ph) * scale + mu_y
+        cal_std = np.std(val_predictions_cal)
+        target_std = np.std(val_targets)
+        ratio = cal_std / target_std if target_std > 0 else 0
+        
+        logger.info(f"Variance-matching calibration: y = {self.calibration_a:.6f} + {self.calibration_b:.6f} * (yhat - {mu_ph:.6f})")
+        logger.info(f"Calibrated pred std: {cal_std:.6f}, target std: {target_std:.6f}, ratio: {ratio:.3f}")
+        
+        # Check if calibration helped
+        if ratio < 0.25:
+            logger.warning(f"PREDICTION COLLAPSE: pred_std {cal_std:.6f} < 0.25 * target_std {target_std:.6f}")
     
     def _apply_calibration(self, predictions: np.ndarray) -> np.ndarray:
         """Apply calibration to predictions."""

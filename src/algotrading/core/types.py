@@ -19,17 +19,17 @@ class TrainingConfig:
     """Training configuration parameters."""
     # Model architecture
     sequence_length: int = 30
-    hidden_size: int = 64
-    num_layers: int = 2
+    hidden_size: int = 32  # Further reduced for tiny cross-section
+    num_layers: int = 1    # Keep single layer
     embedding_dim: int = 12
-    dropout: float = 0.1
+    dropout: float = 0.05  # Further reduced to avoid over-shrinking outputs
     
     # Training parameters
-    learning_rate: float = 1e-3
-    batch_size: int = 256
-    max_epochs: int = 30
-    early_stopping_patience: int = 8
-    weight_decay: float = 5e-5
+    learning_rate: float = 3e-4  # Lower LR for stability
+    batch_size: int = 6    # Exactly one day per batch for cross-sectional training
+    max_epochs: int = 20   # More epochs with cosine+warmup
+    early_stopping_patience: int = 4  # Shorter patience
+    weight_decay: float = 1e-5  # Reduced for tiny cross-section
     
     # Data parameters
     horizon_days: int = 5
@@ -62,6 +62,7 @@ class ModelMetrics:
     
     # Additional diagnostics
     prediction_std: float = 0.0
+    target_std: float = 0.0
     constant_predictions: bool = False
     dead_features: List[str] = None
     

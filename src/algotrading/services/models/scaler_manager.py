@@ -118,18 +118,18 @@ def validate_feature_target_alignment(features: pd.DataFrame, targets: pd.Series
 def enforce_feature_config(features: pd.DataFrame, expected_features: list) -> pd.DataFrame:
     """Enforce that features exactly match configuration."""
     
-    actual_features = set(features.columns)
-    expected_features = set(expected_features)
+    # Check for missing features
+    missing = [c for c in expected_features if c not in features.columns]
+    if missing:
+        raise ValueError(f"Missing features: {missing}")
     
-    if actual_features != expected_features:
-        missing = expected_features - actual_features
-        extra = actual_features - expected_features
-        
-        if missing:
-            raise ValueError(f"Missing features: {missing}")
-        if extra:
-            logger.warning(f"Extra features found: {extra}. Dropping them.")
-            features = features[list(expected_features)]
+    # Check for extra features
+    extra = [c for c in features.columns if c not in expected_features]
+    if extra:
+        logger.warning(f"Extra features found: {extra}. Dropping them.")
+    
+    # Return features in exact expected order
+    features = features[expected_features]
     
     logger.info(f"Feature validation passed. Using {len(features.columns)} features: {list(features.columns)}")
     return features
